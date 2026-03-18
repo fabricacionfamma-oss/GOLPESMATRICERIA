@@ -25,7 +25,9 @@ st.divider()
 # 2. ENLACES DE GOOGLE SHEETS
 # ==========================================
 URL_CATALOGO = "https://docs.google.com/spreadsheets/d/1feaeFLl2UslCsO4mzldUVFuhY1bdnUiQPatRM2m0sW0/export?format=csv&gid=1862158700"
-URL_PRODUCCION = "https://docs.google.com/spreadsheets/d/1TdQ3yNxx29SgQ7u8oexxlnL80rAcXQuP118wQVBd9ew/export?format=csv&gid=315437448"
+
+# --- AQUÍ ESTÁ EL ENLACE ACTUALIZADO A LA NUEVA DIRECCIÓN DE PRODUCCIÓN ---
+URL_PRODUCCION = "https://docs.google.com/spreadsheets/d/1c4aEFtCS-sJZFcH6iLb8AdBVsPrz0pNWayHR2-Dhfm8/export?format=csv&gid=315437448"
 
 URL_PREV_FAMMA = "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888"
 URL_CORR_FAMMA = "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679"
@@ -298,7 +300,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.cell(20, 8, f"{int(round(total_ok/total_gen*100))}%", 1, 0, 'C', fill=True)
     pdf.cell(30, 8, f"{int(round(total_nok/total_gen*100))}%", 1, 1, 'C', fill=True)
     
-    # Gráfico Corregido (Renault y otros OK mostrarán 100% verde)
+    # Gráfico Corregido
     df_chart = pd.DataFrame(resumen_data)
     fig = go.Figure()
     fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['OK'], name='CON PREVENTIVO (OK)', marker_color='#2ca02c', text=df_chart['POK'], textposition='auto'))
