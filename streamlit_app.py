@@ -44,7 +44,6 @@ def clean_str(val):
     return v
 
 def get_match_key(pieza_str):
-    """Extrae el código limpio, quitando descripciones extra o barras."""
     pieza_str = str(pieza_str).strip()
     p = pieza_str.split('/')[0].strip()
     if ' - ' in p:
@@ -57,23 +56,33 @@ def extract_mantenimientos(url, tipo_mant):
     try:
         df = pd.read_csv(url)
         cols = [str(c).upper().strip() for c in df.columns]
-        col_fecha = next((i for i, c in enumerate(cols) if 'FECHA' in c), None)
-        col_term = next((i for i, c in enumerate(cols) if 'TERMINADO' in c or 'TERMINO' in c), None)
         
+        # 1. Buscar la columna de fecha
+        col_fecha = next((i for i, c in enumerate(cols) if 'FECHA' in c or 'MARCA TEMPORAL' in c), None)
         if col_fecha is None: 
-            st.warning(f"⚠️ No se encontró la columna 'FECHA' en el archivo {tipo_mant}")
             return pd.DataFrame()
-            
+
+        # 2. Buscar TODAS las columnas que indiquen si terminó (Aplica a PREV y CORR)
+        terminos_clave = ['TERMINO', 'PREVENTIVO?', 'TERMINADO', 'CORRECTIVO']
+        cols_terminado_idx = [i for i, c in enumerate(cols) if any(t in c for t in terminos_clave)]
+        
         registros = []
         for _, row in df.iterrows():
             fecha = pd.to_datetime(row.iloc[col_fecha], dayfirst=True, errors='coerce')
             if pd.isna(fecha): continue
             
+            # 3. Revisar en todas las columnas de 'Terminado'
             estado_terminado = 'NO'
-            if col_term is not None and pd.notna(row.iloc[col_term]):
-                v_term = str(row.iloc[col_term]).strip().upper()
-                if 'SI' in v_term or 'SÍ' in v_term: estado_terminado = 'SI'
+            if not cols_terminado_idx: 
+                 estado_terminado = 'SI'
+            else:
+                for idx in cols_terminado_idx:
+                    val = str(row.iloc[idx]).strip().upper()
+                    if val == 'SI' or val == 'SÍ':
+                        estado_terminado = 'SI'
+                        break
                 
+            # 4. Extraer pieza y OP
             for i, col_name in enumerate(cols):
                 base_col = col_name.split('.')[0].strip()
                 if base_col in VALID_PIEZA_COLS:
@@ -86,7 +95,13 @@ def extract_mantenimientos(url, tipo_mant):
                             if 'OPERACION' in next_col or 'OPERACIÓN' in next_col or 'OP' == next_col:
                                 op = clean_str(row.iloc[j])
                                 break
-                        registros.append({'Fecha': fecha, 'Pieza_Match': pieza_match, 'OP': op, 'Tipo_Mant': tipo_mant, 'Terminado': estado_terminado})
+                        registros.append({
+                            'Fecha': fecha, 
+                            'Pieza_Match': pieza_match, 
+                            'OP': op, 
+                            'Tipo_Mant': tipo_mant, 
+                            'Terminado': estado_terminado
+                        })
         return pd.DataFrame(registros)
     except Exception as e:
         st.error(f"❌ Error al extraer datos de {tipo_mant}: {e}")
@@ -152,7 +167,6 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         if not df_mant.empty:
             match = df_mant[(df_mant['Pieza_Match'] == pieza_match) & (df_mant['OP'] == op)]
             
-            # Revisar los cerrados ('SI')
             term = match[match['Terminado'] == 'SI']
             max_fecha_cerrado = pd.NaT
             if not term.empty:
@@ -162,15 +176,12 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
                 if pd.notna(max_p) and (pd.isna(fecha_prev) or max_p > fecha_prev): fecha_prev = max_p
                 if pd.notna(max_c) and (pd.isna(fecha_corr) or max_c > fecha_corr): fecha_corr = max_c
                 
-            # Revisar los abiertos ('NO') y comparar con el último cierre
             ab = match[match['Terminado'] == 'NO']
             if not ab.empty:
                 max_fecha_abierto = ab['Fecha'].max()
-                # SOLO marcamos como abierto si la fecha del 'NO' es estrictamente mayor que el último 'SÍ'
                 if pd.isna(max_fecha_cerrado) or max_fecha_abierto > max_fecha_cerrado:
                     tiene_abierto = True
                     fecha_abierto = max_fecha_abierto
-                    # Tomar el tipo del registro más reciente
                     tipo_abierto = ab.loc[ab['Fecha'].idxmax(), 'Tipo_Mant']
 
         fecha_base = pd.NaT
@@ -260,12 +271,18 @@ def build_pdf_golpes(df_resultados, df_abiertos):
         pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de Cierre)", ln=True)
         pdf.ln(3)
         pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(192, 0, 0); pdf.set_text_color(255, 255, 255)
-        pdf.cell(25, 8, "Cliente", 1, 0, 'C', fill=True); pdf.cell(90, 8, "Pieza", 1, 0, 'C', fill=True); pdf.cell(15, 8, "OP", 1, 0, 'C', fill=True)
-        pdf.cell(35, 8, "Tipo Mant.", 1, 0, 'C', fill=True); pdf.cell(35, 8, "Fecha Apertura", 1, 1, 'C', fill=True)
+        pdf.cell(25, 8, "Cliente", 1, 0, 'C', fill=True)
+        pdf.cell(90, 8, "Pieza", 1, 0, 'C', fill=True)
+        pdf.cell(15, 8, "OP", 1, 0, 'C', fill=True)
+        pdf.cell(35, 8, "Tipo Mant.", 1, 0, 'C', fill=True)
+        pdf.cell(35, 8, "Fecha Apertura", 1, 1, 'C', fill=True)
         pdf.set_font("Arial", '', 8); pdf.set_text_color(0, 0, 0)
         for _, r in df_abiertos.iterrows():
-            pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C'); pdf.cell(90, 7, r['PIEZA'], 1, 0, 'L')
-            pdf.cell(15, 7, r['OP'], 1, 0, 'C'); pdf.cell(35, 7, r['TIPO_MANT_ABIERTO'], 1, 0, 'C'); pdf.cell(35, 7, r['FECHA_APERTURA'], 1, 1, 'C')
+            pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C')
+            pdf.cell(90, 7, r['PIEZA'], 1, 0, 'L')
+            pdf.cell(15, 7, r['OP'], 1, 0, 'C')
+            pdf.cell(35, 7, r['TIPO_MANT_ABIERTO'], 1, 0, 'C')
+            pdf.cell(35, 7, r['FECHA_APERTURA'], 1, 1, 'C')
 
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14); pdf.set_text_color(31, 73, 125)
@@ -283,7 +300,8 @@ def build_pdf_golpes(df_resultados, df_abiertos):
         nok = tot - ok
         resumen_data.append({
             'CLIENTE': c, 'TOT': tot, 'OK': ok, 'NOK': nok, 
-            'POK': f"{int(round(ok/tot*100))}%", 'PNOK': f"{int(round(nok/tot*100))}%"
+            'POK': f"{int(round(ok/tot*100))}%" if tot>0 else "0%", 
+            'PNOK': f"{int(round(nok/tot*100))}%" if tot>0 else "0%"
         })
 
     pdf.set_font("Arial", 'B', 10); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
@@ -297,13 +315,19 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     
     pdf.set_font("Arial", '', 10); pdf.set_text_color(0, 0, 0)
     for r in resumen_data:
-        pdf.set_x(mx); pdf.cell(40, 8, r['CLIENTE'], 1, 0, 'C'); pdf.cell(30, 8, str(r['TOT']), 1, 0, 'C')
-        pdf.cell(35, 8, str(r['OK']), 1, 0, 'C'); pdf.cell(35, 8, str(r['NOK']), 1, 0, 'C')
-        pdf.cell(20, 8, r['POK'], 1, 0, 'C'); pdf.cell(30, 8, r['PNOK'], 1, 1, 'C')
+        pdf.set_x(mx)
+        pdf.cell(40, 8, r['CLIENTE'], 1, 0, 'C')
+        pdf.cell(30, 8, str(r['TOT']), 1, 0, 'C')
+        pdf.cell(35, 8, str(r['OK']), 1, 0, 'C')
+        pdf.cell(35, 8, str(r['NOK']), 1, 0, 'C')
+        pdf.cell(20, 8, r['POK'], 1, 0, 'C')
+        pdf.cell(30, 8, r['PNOK'], 1, 1, 'C')
         
     pdf.set_x(mx); pdf.set_font("Arial", 'B', 10); pdf.set_fill_color(220, 220, 220)
-    pdf.cell(40, 8, "TOTAL", 1, 0, 'C', fill=True); pdf.cell(30, 8, str(total_gen), 1, 0, 'C', fill=True)
-    pdf.cell(35, 8, str(total_ok), 1, 0, 'C', fill=True); pdf.cell(35, 8, str(total_nok), 1, 0, 'C', fill=True)
+    pdf.cell(40, 8, "TOTAL", 1, 0, 'C', fill=True)
+    pdf.cell(30, 8, str(total_gen), 1, 0, 'C', fill=True)
+    pdf.cell(35, 8, str(total_ok), 1, 0, 'C', fill=True)
+    pdf.cell(35, 8, str(total_nok), 1, 0, 'C', fill=True)
     pdf.cell(20, 8, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
     pdf.cell(30, 8, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
     
@@ -319,13 +343,15 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             pdf.ln(10); pdf.image(tmp.name, x=61, w=175); os.remove(tmp.name)
     
     buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    pdf.output(buf.name); b = open(buf.name, "rb").read(); os.remove(buf.name); return b
+    pdf.output(buf.name)
+    b = open(buf.name, "rb").read()
+    os.remove(buf.name)
+    return b
 
 # ==========================================
 # 6. INTERFAZ DE STREAMLIT
 # ==========================================
 
-# Botón para forzar actualización
 if st.button("🔄 Forzar Actualización de Datos (Borrar Caché)", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
@@ -347,7 +373,8 @@ if datos_listos:
         if st.button("Procesar y Generar PDF de Golpes", use_container_width=True, type="primary"):
             with st.spinner("Calculando estado de matrices..."):
                 df_res, df_abiertos = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
-                if df_res.empty: st.warning("No hay datos activos en el catálogo.")
+                if df_res.empty: 
+                    st.warning("No hay datos activos en el catálogo.")
                 else:
                     rojos = len(df_res[df_res['COLOR']=='ROJO'])
                     amarillos = len(df_res[df_res['COLOR']=='AMARILLO'])
@@ -356,4 +383,10 @@ if datos_listos:
                     
                     pdf_data = build_pdf_golpes(df_res, df_abiertos)
                     h = datetime.utcnow() - timedelta(hours=3)
-                    st.download_button(label="📥 Descargar Reporte en PDF", data=pdf_data, file_name=f"Reporte_Golpes_{h.strftime('%d%m%Y')}.pdf", mime="application/pdf", use_container_width=True)
+                    st.download_button(
+                        label="📥 Descargar Reporte en PDF", 
+                        data=pdf_data, 
+                        file_name=f"Reporte_Golpes_{h.strftime('%d%m%Y')}.pdf", 
+                        mime="application/pdf", 
+                        use_container_width=True
+                    )
