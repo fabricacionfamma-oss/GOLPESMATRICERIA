@@ -22,7 +22,7 @@ st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Producc
 st.divider()
 
 # ==========================================
-# 2. ENLACES DE GOOGLE SHEETS (Formato CSV)
+# 2. ENLACES DE GOOGLE SHEETS
 # ==========================================
 URL_CATALOGO = "https://docs.google.com/spreadsheets/d/1feaeFLl2UslCsO4mzldUVFuhY1bdnUiQPatRM2m0sW0/export?format=csv&gid=1862158700"
 URL_PRODUCCION = "https://docs.google.com/spreadsheets/d/1c4aEFtCS-sJZFcH6iLb8AdBVsPrz0pNWayHR2-Dhfm8/export?format=csv&gid=315437448"
@@ -44,11 +44,22 @@ def clean_str(val):
     return v
 
 def get_match_key(pieza_str):
-    """Extrae el prefijo antes de la barra para manejar piezas pares."""
-    return pieza_str.split('/')[0].strip() if '/' in pieza_str else pieza_str
+    """Extrae el código limpio, quitando descripciones extra o barras."""
+    pieza_str = str(pieza_str).strip()
+    
+    # 1. Quitar lo que esté después de una barra (piezas dobles)
+    p = pieza_str.split('/')[0].strip()
+    
+    # 2. Quitar lo que esté después de un guion (descripciones como " - FIANCO DX")
+    if ' - ' in p:
+        p = p.split(' - ')[0].strip()
+    elif '-' in p:
+        # Por si alguien lo escribió sin espacios tipo "FAA0052054846-FIANCO"
+        p = p.split('-')[0].strip()
+        
+    return p
 
 def extract_mantenimientos(url, tipo_mant):
-    """Función mejorada con manejo de errores visibles."""
     try:
         df = pd.read_csv(url)
         cols = [str(c).upper().strip() for c in df.columns]
@@ -169,7 +180,7 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         elif pd.notna(fecha_prev): fecha_base = fecha_prev
         elif pd.notna(fecha_corr): fecha_base = fecha_corr
 
-        # CONTEO DE GOLPES
+        # CONTEO DE GOLPES: ÚNICAMENTE DESDE EL ARCHIVO DE PRODUCCIÓN
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         if pd.notna(fecha_base):
             prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
@@ -218,6 +229,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
+    # --- TABLA PRINCIPAL ---
     pdf.set_font("Arial", 'B', 9)
     pdf.set_fill_color(31, 73, 125)
     pdf.set_text_color(255, 255, 255)
@@ -249,6 +261,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
         pdf.cell(72, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
 
+    # --- ANEXO 1: ABIERTOS ---
     if not df_abiertos.empty:
         pdf.add_page()
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0)
@@ -262,6 +275,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C'); pdf.cell(90, 7, r['PIEZA'], 1, 0, 'L')
             pdf.cell(15, 7, r['OP'], 1, 0, 'C'); pdf.cell(35, 7, r['TIPO_MANT_ABIERTO'], 1, 0, 'C'); pdf.cell(35, 7, r['FECHA_APERTURA'], 1, 1, 'C')
 
+    # --- ANEXO 2: RESUMEN Y GRÁFICO ---
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14); pdf.set_text_color(31, 73, 125)
     pdf.cell(0, 10, "ESTADO GENERAL DEL MANTENIMIENTO PREVENTIVO", ln=True, align='C'); pdf.ln(5)
@@ -281,6 +295,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             'POK': f"{int(round(ok/tot*100))}%", 'PNOK': f"{int(round(nok/tot*100))}%"
         })
 
+    # Tabla de Títulos Correctos
     pdf.set_font("Arial", 'B', 10); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     mx = 48.5; pdf.set_x(mx)
     pdf.cell(40, 8, "CLIENTE", 1, 0, 'C', fill=True)
@@ -302,6 +317,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.cell(20, 8, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
     pdf.cell(30, 8, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
     
+    # Gráfico Corregido
     df_chart = pd.DataFrame(resumen_data)
     if not df_chart.empty:
         fig = go.Figure()
@@ -320,19 +336,17 @@ def build_pdf_golpes(df_resultados, df_abiertos):
 # 6. INTERFAZ DE STREAMLIT
 # ==========================================
 
-# Botón para limpiar caché y forzar actualización
+# Botón para forzar actualización (arriba del todo para mayor comodidad)
 if st.button("🔄 Forzar Actualización de Datos (Borrar Caché)", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
-
-st.divider()
 
 with st.spinner("Conectando y descargando bases de datos..."):
     try:
         df_cat_raw, df_prod_raw, df_mant_raw = load_all_data()
         datos_listos = True
     except Exception as e:
-        st.error(f"Error critico al cargar los datos principales: {e}")
+        st.error(f"Error critico: {e}")
         datos_listos = False
 
 if datos_listos:
