@@ -46,17 +46,11 @@ def clean_str(val):
 def get_match_key(pieza_str):
     """Extrae el código limpio, quitando descripciones extra o barras."""
     pieza_str = str(pieza_str).strip()
-    
-    # 1. Quitar lo que esté después de una barra (piezas dobles)
     p = pieza_str.split('/')[0].strip()
-    
-    # 2. Quitar lo que esté después de un guion (descripciones como " - FIANCO DX")
     if ' - ' in p:
         p = p.split(' - ')[0].strip()
     elif '-' in p:
-        # Por si alguien lo escribió sin espacios tipo "FAA0052054846-FIANCO"
         p = p.split('-')[0].strip()
-        
     return p
 
 def extract_mantenimientos(url, tipo_mant):
@@ -100,7 +94,6 @@ def extract_mantenimientos(url, tipo_mant):
 
 @st.cache_data(ttl=300)
 def load_all_data():
-    # 1. Catálogo
     df_cat = pd.read_csv(URL_CATALOGO)
     df_cat.columns = df_cat.columns.astype(str).str.replace('\n', ' ').str.replace('\r', '').str.strip()
     df_cat.columns = df_cat.columns.str.replace(r'\s+', ' ', regex=True)
@@ -108,7 +101,6 @@ def load_all_data():
     if col_activo:
         df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
     
-    # 2. Producción
     df_prod = pd.read_csv(URL_PRODUCCION)
     df_prod.columns = df_prod.columns.astype(str).str.strip()
     col_fecha_prod = next((c for c in df_prod.columns if 'fecha' in c.lower() and 'inicio' not in c.lower()), None)
@@ -123,7 +115,6 @@ def load_all_data():
     col_pieza_prod = next((c for c in df_prod.columns if 'código producto' in c.lower() or 'codigo producto' in c.lower() or 'pieza' in c.lower()), None)
     df_prod['Pieza_Match'] = df_prod[col_pieza_prod].apply(lambda x: get_match_key(clean_str(x))) if col_pieza_prod else "" 
     
-    # 3. Mantenimientos
     df_prev = extract_mantenimientos(URL_PREV_FAMMA, "PREV")
     df_corr = extract_mantenimientos(URL_CORR_FAMMA, "CORR")
     return df_cat, df_prod, pd.concat([df_prev, df_corr], ignore_index=True)
@@ -155,44 +146,47 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         fecha_prev, fecha_corr, fecha_abierto = pd.NaT, pd.NaT, pd.NaT
         tiene_abierto, tipo_abierto = False, ""
         
-        # Fechas manuales del catálogo
         if col_prev: fecha_prev = pd.to_datetime(row.get(col_prev), dayfirst=True, errors='coerce')
         if col_corr: fecha_corr = pd.to_datetime(row.get(col_corr), dayfirst=True, errors='coerce')
 
-        # Fechas de formularios
         if not df_mant.empty:
             match = df_mant[(df_mant['Pieza_Match'] == pieza_match) & (df_mant['OP'] == op)]
+            
+            # Revisar los cerrados ('SI')
             term = match[match['Terminado'] == 'SI']
+            max_fecha_cerrado = pd.NaT
             if not term.empty:
+                max_fecha_cerrado = term['Fecha'].max()
                 max_p = term[term['Tipo_Mant'] == 'PREV']['Fecha'].max()
                 max_c = term[term['Tipo_Mant'] == 'CORR']['Fecha'].max()
                 if pd.notna(max_p) and (pd.isna(fecha_prev) or max_p > fecha_prev): fecha_prev = max_p
                 if pd.notna(max_c) and (pd.isna(fecha_corr) or max_c > fecha_corr): fecha_corr = max_c
+                
+            # Revisar los abiertos ('NO') y comparar con el último cierre
             ab = match[match['Terminado'] == 'NO']
             if not ab.empty:
-                tiene_abierto = True
-                fecha_abierto = ab['Fecha'].max()
-                tipo_abierto = ab.loc[ab['Fecha'].idxmax(), 'Tipo_Mant']
+                max_fecha_abierto = ab['Fecha'].max()
+                # SOLO marcamos como abierto si la fecha del 'NO' es estrictamente mayor que el último 'SÍ'
+                if pd.isna(max_fecha_cerrado) or max_fecha_abierto > max_fecha_cerrado:
+                    tiene_abierto = True
+                    fecha_abierto = max_fecha_abierto
+                    # Tomar el tipo del registro más reciente
+                    tipo_abierto = ab.loc[ab['Fecha'].idxmax(), 'Tipo_Mant']
 
-        # Punto de reinicio de golpes
         fecha_base = pd.NaT
         if pd.notna(fecha_prev) and pd.notna(fecha_corr): fecha_base = max(fecha_prev, fecha_corr)
         elif pd.notna(fecha_prev): fecha_base = fecha_prev
         elif pd.notna(fecha_corr): fecha_base = fecha_corr
 
-        # CONTEO DE GOLPES: ÚNICAMENTE DESDE EL ARCHIVO DE PRODUCCIÓN
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         if pd.notna(fecha_base):
             prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
         
         golpes_totales = int(prod_match['Golpes_Totales'].sum())
         
-        color = "VERDE"
-        estado = "OK"
-        if golpes_totales >= limite_mant:
-            color, estado = "ROJO", "MANT. REQUERIDO"
-        elif golpes_totales >= limite_alerta:
-            color, estado = "AMARILLO", "ALERTA PREVENTIVO"
+        color, estado = "VERDE", "OK"
+        if golpes_totales >= limite_mant: color, estado = "ROJO", "MANT. REQUERIDO"
+        elif golpes_totales >= limite_alerta: color, estado = "AMARILLO", "ALERTA PREVENTIVO"
             
         resultados.append({
             'CLIENTE': clean_str(row.get(col_cliente, '-')), 'PIEZA': pieza_completa, 'OP': op,
@@ -229,7 +223,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    # --- TABLA PRINCIPAL ---
     pdf.set_font("Arial", 'B', 9)
     pdf.set_fill_color(31, 73, 125)
     pdf.set_text_color(255, 255, 255)
@@ -261,7 +254,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
         pdf.cell(72, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
 
-    # --- ANEXO 1: ABIERTOS ---
     if not df_abiertos.empty:
         pdf.add_page()
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0)
@@ -275,7 +267,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C'); pdf.cell(90, 7, r['PIEZA'], 1, 0, 'L')
             pdf.cell(15, 7, r['OP'], 1, 0, 'C'); pdf.cell(35, 7, r['TIPO_MANT_ABIERTO'], 1, 0, 'C'); pdf.cell(35, 7, r['FECHA_APERTURA'], 1, 1, 'C')
 
-    # --- ANEXO 2: RESUMEN Y GRÁFICO ---
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14); pdf.set_text_color(31, 73, 125)
     pdf.cell(0, 10, "ESTADO GENERAL DEL MANTENIMIENTO PREVENTIVO", ln=True, align='C'); pdf.ln(5)
@@ -295,7 +286,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             'POK': f"{int(round(ok/tot*100))}%", 'PNOK': f"{int(round(nok/tot*100))}%"
         })
 
-    # Tabla de Títulos Correctos
     pdf.set_font("Arial", 'B', 10); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     mx = 48.5; pdf.set_x(mx)
     pdf.cell(40, 8, "CLIENTE", 1, 0, 'C', fill=True)
@@ -317,7 +307,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.cell(20, 8, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
     pdf.cell(30, 8, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
     
-    # Gráfico Corregido
     df_chart = pd.DataFrame(resumen_data)
     if not df_chart.empty:
         fig = go.Figure()
@@ -336,7 +325,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
 # 6. INTERFAZ DE STREAMLIT
 # ==========================================
 
-# Botón para forzar actualización (arriba del todo para mayor comodidad)
+# Botón para forzar actualización
 if st.button("🔄 Forzar Actualización de Datos (Borrar Caché)", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
