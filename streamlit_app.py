@@ -22,13 +22,10 @@ st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Producc
 st.divider()
 
 # ==========================================
-# 2. ENLACES DE GOOGLE SHEETS
+# 2. ENLACES DE GOOGLE SHEETS (Formato CSV)
 # ==========================================
 URL_CATALOGO = "https://docs.google.com/spreadsheets/d/1feaeFLl2UslCsO4mzldUVFuhY1bdnUiQPatRM2m0sW0/export?format=csv&gid=1862158700"
-
-# --- AQUÍ ESTÁ EL ENLACE ACTUALIZADO A LA NUEVA DIRECCIÓN DE PRODUCCIÓN ---
 URL_PRODUCCION = "https://docs.google.com/spreadsheets/d/1c4aEFtCS-sJZFcH6iLb8AdBVsPrz0pNWayHR2-Dhfm8/export?format=csv&gid=315437448"
-
 URL_PREV_FAMMA = "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888"
 URL_CORR_FAMMA = "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679"
 
@@ -51,20 +48,27 @@ def get_match_key(pieza_str):
     return pieza_str.split('/')[0].strip() if '/' in pieza_str else pieza_str
 
 def extract_mantenimientos(url, tipo_mant):
+    """Función mejorada con manejo de errores visibles."""
     try:
         df = pd.read_csv(url)
         cols = [str(c).upper().strip() for c in df.columns]
         col_fecha = next((i for i, c in enumerate(cols) if 'FECHA' in c), None)
         col_term = next((i for i, c in enumerate(cols) if 'TERMINADO' in c or 'TERMINO' in c), None)
-        if col_fecha is None: return pd.DataFrame()
+        
+        if col_fecha is None: 
+            st.warning(f"⚠️ No se encontró la columna 'FECHA' en el archivo {tipo_mant}")
+            return pd.DataFrame()
+            
         registros = []
         for _, row in df.iterrows():
             fecha = pd.to_datetime(row.iloc[col_fecha], dayfirst=True, errors='coerce')
             if pd.isna(fecha): continue
+            
             estado_terminado = 'NO'
             if col_term is not None and pd.notna(row.iloc[col_term]):
                 v_term = str(row.iloc[col_term]).strip().upper()
                 if 'SI' in v_term or 'SÍ' in v_term: estado_terminado = 'SI'
+                
             for i, col_name in enumerate(cols):
                 base_col = col_name.split('.')[0].strip()
                 if base_col in VALID_PIEZA_COLS:
@@ -79,7 +83,9 @@ def extract_mantenimientos(url, tipo_mant):
                                 break
                         registros.append({'Fecha': fecha, 'Pieza_Match': pieza_match, 'OP': op, 'Tipo_Mant': tipo_mant, 'Terminado': estado_terminado})
         return pd.DataFrame(registros)
-    except: return pd.DataFrame()
+    except Exception as e:
+        st.error(f"❌ Error al extraer datos de {tipo_mant}: {e}")
+        return pd.DataFrame()
 
 @st.cache_data(ttl=300)
 def load_all_data():
@@ -163,7 +169,7 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         elif pd.notna(fecha_prev): fecha_base = fecha_prev
         elif pd.notna(fecha_corr): fecha_base = fecha_corr
 
-        # CONTEO DE GOLPES: ÚNICAMENTE DESDE EL ARCHIVO DE PRODUCCIÓN
+        # CONTEO DE GOLPES
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         if pd.notna(fecha_base):
             prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
@@ -212,7 +218,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    # --- TABLA PRINCIPAL ---
     pdf.set_font("Arial", 'B', 9)
     pdf.set_fill_color(31, 73, 125)
     pdf.set_text_color(255, 255, 255)
@@ -244,7 +249,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
         pdf.cell(72, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
 
-    # --- ANEXO 1: ABIERTOS ---
     if not df_abiertos.empty:
         pdf.add_page()
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0)
@@ -258,7 +262,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C'); pdf.cell(90, 7, r['PIEZA'], 1, 0, 'L')
             pdf.cell(15, 7, r['OP'], 1, 0, 'C'); pdf.cell(35, 7, r['TIPO_MANT_ABIERTO'], 1, 0, 'C'); pdf.cell(35, 7, r['FECHA_APERTURA'], 1, 1, 'C')
 
-    # --- ANEXO 2: RESUMEN Y GRÁFICO ---
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14); pdf.set_text_color(31, 73, 125)
     pdf.cell(0, 10, "ESTADO GENERAL DEL MANTENIMIENTO PREVENTIVO", ln=True, align='C'); pdf.ln(5)
@@ -278,7 +281,6 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             'POK': f"{int(round(ok/tot*100))}%", 'PNOK': f"{int(round(nok/tot*100))}%"
         })
 
-    # Tabla de Títulos Correctos
     pdf.set_font("Arial", 'B', 10); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     mx = 48.5; pdf.set_x(mx)
     pdf.cell(40, 8, "CLIENTE", 1, 0, 'C', fill=True)
@@ -297,32 +299,40 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.set_x(mx); pdf.set_font("Arial", 'B', 10); pdf.set_fill_color(220, 220, 220)
     pdf.cell(40, 8, "TOTAL", 1, 0, 'C', fill=True); pdf.cell(30, 8, str(total_gen), 1, 0, 'C', fill=True)
     pdf.cell(35, 8, str(total_ok), 1, 0, 'C', fill=True); pdf.cell(35, 8, str(total_nok), 1, 0, 'C', fill=True)
-    pdf.cell(20, 8, f"{int(round(total_ok/total_gen*100))}%", 1, 0, 'C', fill=True)
-    pdf.cell(30, 8, f"{int(round(total_nok/total_gen*100))}%", 1, 1, 'C', fill=True)
+    pdf.cell(20, 8, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
+    pdf.cell(30, 8, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
     
-    # Gráfico Corregido
     df_chart = pd.DataFrame(resumen_data)
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['OK'], name='CON PREVENTIVO (OK)', marker_color='#2ca02c', text=df_chart['POK'], textposition='auto'))
-    fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['NOK'], name='SIN MANTENIMIENTO (ALERTA/REQ)', marker_color='#d62728', text=df_chart['PNOK'], textposition='auto'))
-    fig.update_layout(title="Estado de Mantenimiento por Cliente", barmode='group', width=750, height=400, plot_bgcolor='rgba(0,0,0,0)', legend=dict(x=0.7, y=1.1))
-    
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-        fig.write_image(tmp.name, engine="kaleido")
-        pdf.ln(10); pdf.image(tmp.name, x=61, w=175); os.remove(tmp.name)
+    if not df_chart.empty:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['OK'], name='CON PREVENTIVO (OK)', marker_color='#2ca02c', text=df_chart['POK'], textposition='auto'))
+        fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['NOK'], name='SIN MANTENIMIENTO (ALERTA/REQ)', marker_color='#d62728', text=df_chart['PNOK'], textposition='auto'))
+        fig.update_layout(title="Estado de Mantenimiento por Cliente", barmode='group', width=750, height=400, plot_bgcolor='rgba(0,0,0,0)', legend=dict(x=0.7, y=1.1))
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            fig.write_image(tmp.name, engine="kaleido")
+            pdf.ln(10); pdf.image(tmp.name, x=61, w=175); os.remove(tmp.name)
     
     buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     pdf.output(buf.name); b = open(buf.name, "rb").read(); os.remove(buf.name); return b
 
 # ==========================================
-# 6. INTERFAZ DE STREAMLIT (LAYOUT ORIGINAL)
+# 6. INTERFAZ DE STREAMLIT
 # ==========================================
+
+# Botón para limpiar caché y forzar actualización
+if st.button("🔄 Forzar Actualización de Datos (Borrar Caché)", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
+st.divider()
+
 with st.spinner("Conectando y descargando bases de datos..."):
     try:
         df_cat_raw, df_prod_raw, df_mant_raw = load_all_data()
         datos_listos = True
     except Exception as e:
-        st.error(f"Error critico: {e}")
+        st.error(f"Error critico al cargar los datos principales: {e}")
         datos_listos = False
 
 if datos_listos:
