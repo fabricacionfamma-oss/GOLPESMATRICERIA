@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import tempfile
 import os
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from fpdf import FPDF
 
 # ==========================================
@@ -57,12 +58,10 @@ def extract_mantenimientos(url, tipo_mant):
         df = pd.read_csv(url)
         cols = [str(c).upper().strip() for c in df.columns]
         
-        # 1. Buscar la columna de fecha
         col_fecha = next((i for i, c in enumerate(cols) if 'FECHA' in c or 'MARCA TEMPORAL' in c), None)
         if col_fecha is None: 
             return pd.DataFrame()
 
-        # 2. Buscar TODAS las columnas que indiquen si terminó (Aplica a PREV y CORR)
         terminos_clave = ['TERMINO', 'PREVENTIVO?', 'TERMINADO', 'CORRECTIVO']
         cols_terminado_idx = [i for i, c in enumerate(cols) if any(t in c for t in terminos_clave)]
         
@@ -71,7 +70,6 @@ def extract_mantenimientos(url, tipo_mant):
             fecha = pd.to_datetime(row.iloc[col_fecha], dayfirst=True, errors='coerce')
             if pd.isna(fecha): continue
             
-            # 3. Revisar en todas las columnas de 'Terminado'
             estado_terminado = 'NO'
             if not cols_terminado_idx: 
                  estado_terminado = 'SI'
@@ -82,7 +80,6 @@ def extract_mantenimientos(url, tipo_mant):
                         estado_terminado = 'SI'
                         break
                 
-            # 4. Extraer pieza y OP
             for i, col_name in enumerate(cols):
                 base_col = col_name.split('.')[0].strip()
                 if base_col in VALID_PIEZA_COLS:
@@ -218,7 +215,7 @@ class PDFGolpes(FPDF):
     def header(self):
         self.set_font("Arial", 'B', 15)
         self.set_text_color(31, 73, 125)
-        self.cell(0, 10, "Control de Golpes de Matrices (Detalle)", border=0, ln=True, align='C')
+        self.cell(0, 10, "Control de Golpes de Matrices (Detalle Principal)", border=0, ln=True, align='C')
         self.set_font("Arial", 'I', 9)
         self.set_text_color(100, 100, 100)
         hora_arg = datetime.utcnow() - timedelta(hours=3)
@@ -246,8 +243,9 @@ class PDFResumen(FPDF):
         self.set_font("Arial", "I", 8)
         self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
+
 def build_pdf_main(df_resultados, df_abiertos):
-    """Genera el reporte principal: Detalle de piezas y Mantenimientos Abiertos."""
+    """Genera el reporte principal: Detalle de piezas y Mantenimientos Abiertos (Hojas separadas)."""
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
     
     # --- HOJA 1: DETALLE DE GOLPES ---
@@ -287,7 +285,7 @@ def build_pdf_main(df_resultados, df_abiertos):
 
     # --- HOJA 2: MANTENIMIENTOS ABIERTOS ---
     if not df_abiertos.empty:
-        pdf.add_page() # Fuerza salto de hoja
+        pdf.add_page() # Salto estricto a una nueva hoja para los mantenimientos abiertos
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0)
         pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de Cierre)", ln=True)
         pdf.ln(3)
@@ -312,13 +310,11 @@ def build_pdf_main(df_resultados, df_abiertos):
     return b
 
 def build_pdf_resumen(df_resultados):
-    """Genera exclusivamente el reporte de Estado General."""
+    """Genera exclusivamente el reporte de Estado General concentrado en UNA SOLA HOJA."""
     pdf = PDFResumen(orientation='L', unit='mm', format='A4')
     pdf.set_auto_page_break(auto=True, margin=15)
-    
-    # --- HOJA 1: TABLA DE RESUMEN ---
     pdf.add_page()
-    pdf.ln(5)
+    pdf.ln(2)
     
     resumen_data = []
     total_gen = len(df_resultados)
@@ -330,51 +326,86 @@ def build_pdf_resumen(df_resultados):
         tot = len(df_c)
         ok = len(df_c[df_c['COLOR'] == 'VERDE'])
         nok = tot - ok
-        resumen_data.append({
-            'CLIENTE': c, 'TOT': tot, 'OK': ok, 'NOK': nok, 
-            'POK': f"{int(round(ok/tot*100))}%" if tot>0 else "0%", 
-            'PNOK': f"{int(round(nok/tot*100))}%" if tot>0 else "0%"
-        })
+        if tot > 0:
+            resumen_data.append({
+                'CLIENTE': c, 'TOT': tot, 'OK': ok, 'NOK': nok, 
+                'POK': f"{int(round(ok/tot*100))}%", 
+                'PNOK': f"{int(round(nok/tot*100))}%"
+            })
 
-    pdf.set_font("Arial", 'B', 10); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
-    mx = 48.5; pdf.set_x(mx)
-    pdf.cell(40, 8, "CLIENTE", 1, 0, 'C', fill=True)
-    pdf.cell(30, 8, "TOTAL OP", 1, 0, 'C', fill=True)
-    pdf.cell(35, 8, "CON PREVENTIVO", 1, 0, 'C', fill=True)
-    pdf.cell(35, 8, "SIN MANTENIMIENTO", 1, 0, 'C', fill=True)
-    pdf.cell(20, 8, "% PREV", 1, 0, 'C', fill=True)
-    pdf.cell(30, 8, "% SIN MANT", 1, 1, 'C', fill=True)
+    # --- 1. TABLA RESUMEN CON FORMATO MÁS COMPACTO ---
+    pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
+    mx = 43.5; pdf.set_x(mx)
+    pdf.cell(35, 6, "CLIENTE", 1, 0, 'C', fill=True)
+    pdf.cell(25, 6, "TOTAL OP", 1, 0, 'C', fill=True)
+    pdf.cell(35, 6, "CON PREV.", 1, 0, 'C', fill=True)
+    pdf.cell(35, 6, "SIN MANT.", 1, 0, 'C', fill=True)
+    pdf.cell(40, 6, "% PREV", 1, 0, 'C', fill=True)
+    pdf.cell(40, 6, "% SIN MANT", 1, 1, 'C', fill=True)
     
-    pdf.set_font("Arial", '', 10); pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Arial", '', 9); pdf.set_text_color(0, 0, 0)
     for r in resumen_data:
         pdf.set_x(mx)
-        pdf.cell(40, 8, r['CLIENTE'], 1, 0, 'C')
-        pdf.cell(30, 8, str(r['TOT']), 1, 0, 'C')
-        pdf.cell(35, 8, str(r['OK']), 1, 0, 'C')
-        pdf.cell(35, 8, str(r['NOK']), 1, 0, 'C')
-        pdf.cell(20, 8, r['POK'], 1, 0, 'C')
-        pdf.cell(30, 8, r['PNOK'], 1, 1, 'C')
+        pdf.cell(35, 6, r['CLIENTE'], 1, 0, 'C')
+        pdf.cell(25, 6, str(r['TOT']), 1, 0, 'C')
+        pdf.cell(35, 6, str(r['OK']), 1, 0, 'C')
+        pdf.cell(35, 6, str(r['NOK']), 1, 0, 'C')
+        pdf.cell(40, 6, r['POK'], 1, 0, 'C')
+        pdf.cell(40, 6, r['PNOK'], 1, 1, 'C')
         
-    pdf.set_x(mx); pdf.set_font("Arial", 'B', 10); pdf.set_fill_color(220, 220, 220)
-    pdf.cell(40, 8, "TOTAL", 1, 0, 'C', fill=True)
-    pdf.cell(30, 8, str(total_gen), 1, 0, 'C', fill=True)
-    pdf.cell(35, 8, str(total_ok), 1, 0, 'C', fill=True)
-    pdf.cell(35, 8, str(total_nok), 1, 0, 'C', fill=True)
-    pdf.cell(20, 8, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
-    pdf.cell(30, 8, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
+    pdf.set_x(mx); pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(220, 220, 220)
+    pdf.cell(35, 6, "TOTAL", 1, 0, 'C', fill=True)
+    pdf.cell(25, 6, str(total_gen), 1, 0, 'C', fill=True)
+    pdf.cell(35, 6, str(total_ok), 1, 0, 'C', fill=True)
+    pdf.cell(35, 6, str(total_nok), 1, 0, 'C', fill=True)
+    pdf.cell(40, 6, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
+    pdf.cell(40, 6, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
     
-    # --- HOJA 2: GRÁFICO (Salto de hoja forzado) ---
-    pdf.add_page()
-    df_chart = pd.DataFrame(resumen_data)
-    if not df_chart.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['OK'], name='CON PREVENTIVO (OK)', marker_color='#2ca02c', text=df_chart['POK'], textposition='auto'))
-        fig.add_trace(go.Bar(x=df_chart['CLIENTE'], y=df_chart['NOK'], name='SIN MANTENIMIENTO (ALERTA/REQ)', marker_color='#d62728', text=df_chart['PNOK'], textposition='auto'))
-        fig.update_layout(title="Estado de Mantenimiento por Cliente", barmode='group', width=750, height=400, plot_bgcolor='rgba(0,0,0,0)', legend=dict(x=0.7, y=1.1))
+    # --- 2. GRÁFICOS DE TORTA (GENERAL + CLIENTES) EN LA MISMA HOJA ---
+    if len(resumen_data) > 0:
+        pdf.ln(5)
+        y_charts = pdf.get_y()
         
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-            fig.write_image(tmp.name, engine="kaleido")
-            pdf.ln(5); pdf.image(tmp.name, x=61, w=175); os.remove(tmp.name)
+        # Gráfico 1: Torta General
+        fig_gen = go.Figure(data=[go.Pie(
+            labels=['CON PREVENTIVO', 'SIN MANT.'], 
+            values=[total_ok, total_nok], 
+            marker_colors=['#2ca02c', '#d62728']
+        )])
+        fig_gen.update_traces(textposition='inside', textinfo='percent+label', showlegend=False)
+        fig_gen.update_layout(title_text="Matrices Totales", title_x=0.5, margin=dict(t=40, b=10, l=10, r=10), height=300, width=300)
+
+        # Gráfico 2: Tortas por Cliente (Subplots)
+        fig_cli = make_subplots(
+            rows=1, cols=len(resumen_data), 
+            specs=[[{'type':'domain'}] * len(resumen_data)], 
+            subplot_titles=[r['CLIENTE'] for r in resumen_data]
+        )
+        for i, r in enumerate(resumen_data):
+            fig_cli.add_trace(go.Pie(
+                labels=['CON PREVENTIVO', 'SIN MANT.'], 
+                values=[r['OK'], r['NOK']], 
+                marker_colors=['#2ca02c', '#d62728']
+            ), 1, i + 1)
+        
+        fig_cli.update_traces(textposition='inside', textinfo='percent')
+        fig_cli.update_layout(
+            title_text="Desglose por Cliente", title_x=0.5, 
+            showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5), 
+            margin=dict(t=40, b=40, l=10, r=10), height=300, width=700
+        )
+        fig_cli.update_annotations(font_size=12) # Ajusta el texto del nombre del cliente
+        
+        # Inserción de imágenes de manera horizontal
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_gen:
+            fig_gen.write_image(tmp_gen.name, engine="kaleido")
+            pdf.image(tmp_gen.name, x=15, y=y_charts, w=70) # Torta General a la izquierda
+            os.remove(tmp_gen.name)
+            
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_cli:
+            fig_cli.write_image(tmp_cli.name, engine="kaleido")
+            pdf.image(tmp_cli.name, x=90, y=y_charts, w=190) # Tortas Clientes a la derecha
+            os.remove(tmp_cli.name)
     
     buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     pdf.output(buf.name)
@@ -434,7 +465,7 @@ if datos_listos:
         with col_desc1:
             pdf_main_data = build_pdf_main(df_res, df_abiertos)
             st.download_button(
-                label="📥 Descargar Reporte Principal (Detalle)", 
+                label="📥 Descargar Reporte Principal (Detalles y Pendientes)", 
                 data=pdf_main_data, 
                 file_name=f"Reporte_Golpes_Detalle_{fecha_str}.pdf", 
                 mime="application/pdf", 
@@ -444,7 +475,7 @@ if datos_listos:
         with col_desc2:
             pdf_resumen_data = build_pdf_resumen(df_res)
             st.download_button(
-                label="📊 Descargar Resumen General (Mantenimiento)", 
+                label="📊 Descargar Resumen General (Tabla y Gráficos)", 
                 data=pdf_resumen_data, 
                 file_name=f"Reporte_Golpes_Resumen_{fecha_str}.pdf", 
                 mime="application/pdf", 
