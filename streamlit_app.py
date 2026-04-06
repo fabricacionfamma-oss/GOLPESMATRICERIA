@@ -218,19 +218,39 @@ class PDFGolpes(FPDF):
     def header(self):
         self.set_font("Arial", 'B', 15)
         self.set_text_color(31, 73, 125)
-        self.cell(0, 10, "Control de Golpes de Matrices (Mantenimiento)", border=0, ln=True, align='C')
+        self.cell(0, 10, "Control de Golpes de Matrices (Detalle)", border=0, ln=True, align='C')
         self.set_font("Arial", 'I', 9)
         self.set_text_color(100, 100, 100)
         hora_arg = datetime.utcnow() - timedelta(hours=3)
         self.cell(0, 5, f"Calculo generado el: {hora_arg.strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C')
         self.ln(3)
+        
     def footer(self):
         self.set_y(-15)
         self.set_font("Arial", "I", 8)
         self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
-def build_pdf_golpes(df_resultados, df_abiertos):
+class PDFResumen(FPDF):
+    def header(self):
+        self.set_font("Arial", 'B', 15)
+        self.set_text_color(31, 73, 125)
+        self.cell(0, 10, "Estado General del Mantenimiento Preventivo", border=0, ln=True, align='C')
+        self.set_font("Arial", 'I', 9)
+        self.set_text_color(100, 100, 100)
+        hora_arg = datetime.utcnow() - timedelta(hours=3)
+        self.cell(0, 5, f"Generado el: {hora_arg.strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C')
+        self.ln(3)
+        
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("Arial", "I", 8)
+        self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
+
+def build_pdf_main(df_resultados, df_abiertos):
+    """Genera el reporte principal: Detalle de piezas y Mantenimientos Abiertos."""
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
+    
+    # --- HOJA 1: DETALLE DE GOLPES ---
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
@@ -265,8 +285,9 @@ def build_pdf_golpes(df_resultados, df_abiertos):
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
         pdf.cell(72, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
 
+    # --- HOJA 2: MANTENIMIENTOS ABIERTOS ---
     if not df_abiertos.empty:
-        pdf.add_page()
+        pdf.add_page() # Fuerza salto de hoja
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0)
         pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de Cierre)", ln=True)
         pdf.ln(3)
@@ -284,9 +305,20 @@ def build_pdf_golpes(df_resultados, df_abiertos):
             pdf.cell(35, 7, r['TIPO_MANT_ABIERTO'], 1, 0, 'C')
             pdf.cell(35, 7, r['FECHA_APERTURA'], 1, 1, 'C')
 
+    buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    pdf.output(buf.name)
+    b = open(buf.name, "rb").read()
+    os.remove(buf.name)
+    return b
+
+def build_pdf_resumen(df_resultados):
+    """Genera exclusivamente el reporte de Estado General."""
+    pdf = PDFResumen(orientation='L', unit='mm', format='A4')
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # --- HOJA 1: TABLA DE RESUMEN ---
     pdf.add_page()
-    pdf.set_font("Arial", 'B', 14); pdf.set_text_color(31, 73, 125)
-    pdf.cell(0, 10, "ESTADO GENERAL DEL MANTENIMIENTO PREVENTIVO", ln=True, align='C'); pdf.ln(5)
+    pdf.ln(5)
     
     resumen_data = []
     total_gen = len(df_resultados)
@@ -331,6 +363,8 @@ def build_pdf_golpes(df_resultados, df_abiertos):
     pdf.cell(20, 8, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
     pdf.cell(30, 8, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
     
+    # --- HOJA 2: GRÁFICO (Salto de hoja forzado) ---
+    pdf.add_page()
     df_chart = pd.DataFrame(resumen_data)
     if not df_chart.empty:
         fig = go.Figure()
@@ -340,7 +374,7 @@ def build_pdf_golpes(df_resultados, df_abiertos):
         
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
             fig.write_image(tmp.name, engine="kaleido")
-            pdf.ln(10); pdf.image(tmp.name, x=61, w=175); os.remove(tmp.name)
+            pdf.ln(5); pdf.image(tmp.name, x=61, w=175); os.remove(tmp.name)
     
     buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     pdf.output(buf.name)
@@ -367,26 +401,54 @@ with st.spinner("Conectando y descargando bases de datos..."):
 if datos_listos:
     st.success("Bases de datos sincronizadas exitosamente.")
     col1, col2 = st.columns([1, 1])
+    
     with col1:
         st.info("Reporte oficial de control de golpes. Cruza catálogo activo con producción acumulada.")
+        
     with col2:
-        if st.button("Procesar y Generar PDF de Golpes", use_container_width=True, type="primary"):
+        if st.button("⚙️ Procesar Datos de Matrices", use_container_width=True, type="primary"):
             with st.spinner("Calculando estado de matrices..."):
                 df_res, df_abiertos = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
-                if df_res.empty: 
-                    st.warning("No hay datos activos en el catálogo.")
-                else:
-                    rojos = len(df_res[df_res['COLOR']=='ROJO'])
-                    amarillos = len(df_res[df_res['COLOR']=='AMARILLO'])
-                    verdes = len(df_res[df_res['COLOR']=='VERDE'])
-                    st.write(f"**Resumen:** 🔴 {rojos} Críticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
-                    
-                    pdf_data = build_pdf_golpes(df_res, df_abiertos)
-                    h = datetime.utcnow() - timedelta(hours=3)
-                    st.download_button(
-                        label="📥 Descargar Reporte en PDF", 
-                        data=pdf_data, 
-                        file_name=f"Reporte_Golpes_{h.strftime('%d%m%Y')}.pdf", 
-                        mime="application/pdf", 
-                        use_container_width=True
-                    )
+                
+                # Guardamos los resultados en el estado de la sesión para mostrarlos y descargarlos
+                st.session_state['df_res'] = df_res
+                st.session_state['df_abiertos'] = df_abiertos
+
+    # Si los datos ya fueron procesados, mostramos botones de descarga
+    if 'df_res' in st.session_state and not st.session_state['df_res'].empty:
+        df_res = st.session_state['df_res']
+        df_abiertos = st.session_state['df_abiertos']
+        
+        rojos = len(df_res[df_res['COLOR']=='ROJO'])
+        amarillos = len(df_res[df_res['COLOR']=='AMARILLO'])
+        verdes = len(df_res[df_res['COLOR']=='VERDE'])
+        
+        st.write("---")
+        st.write(f"**Resumen de la corrida:** 🔴 {rojos} Críticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
+        
+        col_desc1, col_desc2 = st.columns(2)
+        
+        h = datetime.utcnow() - timedelta(hours=3)
+        fecha_str = h.strftime('%d%m%Y')
+        
+        with col_desc1:
+            pdf_main_data = build_pdf_main(df_res, df_abiertos)
+            st.download_button(
+                label="📥 Descargar Reporte Principal (Detalle)", 
+                data=pdf_main_data, 
+                file_name=f"Reporte_Golpes_Detalle_{fecha_str}.pdf", 
+                mime="application/pdf", 
+                use_container_width=True
+            )
+            
+        with col_desc2:
+            pdf_resumen_data = build_pdf_resumen(df_res)
+            st.download_button(
+                label="📊 Descargar Resumen General (Mantenimiento)", 
+                data=pdf_resumen_data, 
+                file_name=f"Reporte_Golpes_Resumen_{fecha_str}.pdf", 
+                mime="application/pdf", 
+                use_container_width=True
+            )
+    elif 'df_res' in st.session_state and st.session_state['df_res'].empty:
+        st.warning("No hay datos activos en el catálogo.")
