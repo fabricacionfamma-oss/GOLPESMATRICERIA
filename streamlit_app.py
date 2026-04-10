@@ -3,6 +3,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 import tempfile
 import os
+import re
+from difflib import SequenceMatcher
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from fpdf import FPDF
@@ -10,7 +12,7 @@ from fpdf import FPDF
 # ==========================================
 # 1. CONFIGURACIÓN Y ESTILOS
 # ==========================================
-st.set_page_config(page_title="Control de Golpes de Matrices", layout="wide", page_icon="⚙️")
+st.set_page_config(page_title="Control de Golpes de Matrices - Fumiscor", layout="wide", page_icon="⚙️")
 
 st.markdown("""
 <style>
@@ -18,204 +20,241 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="header-style">⚙️ Reporte Auxiliar: Control de Golpes de Matrices (FAMMA)</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Producción y Mantenimiento.</p>", unsafe_allow_html=True)
+st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Base SQL de Producción y Formularios de Mantenimiento.</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
-# 2. ENLACES DE GOOGLE SHEETS
+# 2. ENLACES DE DATOS (FUMISCOR)
 # ==========================================
-URL_CATALOGO = "https://docs.google.com/spreadsheets/d/1feaeFLl2UslCsO4mzldUVFuhY1bdnUiQPatRM2m0sW0/export?format=csv&gid=1862158700"
-URL_PRODUCCION = "https://docs.google.com/spreadsheets/d/1c4aEFtCS-sJZFcH6iLb8AdBVsPrz0pNWayHR2-Dhfm8/export?format=csv&gid=315437448"
-URL_PREV_FAMMA = "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888"
-URL_CORR_FAMMA = "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679"
-
-VALID_PIEZA_COLS = [
-    'PIEZAS RENAULT', 'PIEZAS FAURECIA', 'PIEZAS FIAT', 'PIEZAS DENSO', 
-    'PIEZAS PEUGEOT', 'PIEZA FIAT', 'PIEZA NISSAN', 'PIEZA RENAULT', 'NUMERO DE PIEZA'
-]
+URL_CATALOGO = "https://docs.google.com/spreadsheets/d/198KjQWZwfvvWwq1q1N1zv1cgzkot2hhGbwQvbi9_zFQ/export?format=csv&gid=818188145"
+URL_FORMS_PREV = "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv&gid=1603203990"
+URL_FORMS_CORR = "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893"
 
 # ==========================================
-# 3. FUNCIONES DE LIMPIEZA Y CARGA
+# 3. FUNCIONES DE LIMPIEZA Y COINCIDENCIA
 # ==========================================
 def clean_str(val):
     if pd.isna(val): return ""
-    v = str(val).strip().upper()
-    if v.endswith('.0'): v = v[:-2]
-    return v
+    return str(val).strip().upper()
 
-def get_match_key(pieza_str):
-    pieza_str = str(pieza_str).strip()
-    p = pieza_str.split('/')[0].strip()
-    if ' - ' in p:
-        p = p.split(' - ')[0].strip()
-    elif '-' in p:
-        p = p.split('-')[0].strip()
-    return p
-
-def extract_mantenimientos(url, tipo_mant):
-    try:
-        df = pd.read_csv(url)
-        cols = [str(c).upper().strip() for c in df.columns]
-        
-        col_fecha = next((i for i, c in enumerate(cols) if 'FECHA' in c or 'MARCA TEMPORAL' in c), None)
-        if col_fecha is None: 
-            return pd.DataFrame()
-
-        terminos_clave = ['TERMINO', 'PREVENTIVO?', 'TERMINADO', 'CORRECTIVO']
-        cols_terminado_idx = [i for i, c in enumerate(cols) if any(t in c for t in terminos_clave)]
-        
-        registros = []
-        for _, row in df.iterrows():
-            fecha = pd.to_datetime(row.iloc[col_fecha], dayfirst=True, errors='coerce')
-            if pd.isna(fecha): continue
+def get_best_match(texto, lista_candidatos, umbral=0.5):
+    """Encuentra la mejor coincidencia basada en caracteres compartidos."""
+    if pd.isna(texto) or not str(texto).strip(): return ""
+    val = clean_str(texto)
+    
+    mejor_coincidencia = val
+    mejor_puntaje = 0.0
+    
+    for candidato in lista_candidatos:
+        cand_str = clean_str(candidato)
+        if not cand_str: continue
+        puntaje = SequenceMatcher(None, val, cand_str).ratio()
+        if puntaje > mejor_puntaje:
+            mejor_puntaje = puntaje
+            mejor_coincidencia = cand_str
             
-            estado_terminado = 'NO'
-            if not cols_terminado_idx: 
-                 estado_terminado = 'SI'
-            else:
-                for idx in cols_terminado_idx:
-                    val = str(row.iloc[idx]).strip().upper()
-                    if val == 'SI' or val == 'SÍ':
-                        estado_terminado = 'SI'
+    if mejor_puntaje >= umbral:
+        return mejor_coincidencia
+    return val
+
+@st.cache_data(ttl=60)
+def load_all_sources():
+    # --- A. CARGAR CATÁLOGO ---
+    try:
+        df_cat_raw = pd.read_csv(URL_CATALOGO)
+        header_idx = -1
+        for i, row in df_cat_raw.iterrows():
+            row_vals = " ".join([str(x).upper() for x in row.values])
+            if 'RH' in row_vals and 'CLIENTE' in row_vals:
+                header_idx = i
+                break
+                
+        if header_idx != -1:
+            df_cat = pd.read_csv(URL_CATALOGO, skiprows=header_idx + 1).dropna(how='all')
+        else:
+            df_cat = pd.read_csv(URL_CATALOGO, skiprows=2).dropna(how='all')
+
+        df_cat.columns = [str(c).upper().strip() for c in df_cat.columns]
+        
+        if 'RH' in df_cat.columns:
+            df_cat = df_cat.dropna(subset=['RH'])
+            df_cat = df_cat[df_cat['RH'].astype(str).str.strip() != '']
+            df_cat['PIEZA_KEY'] = df_cat['RH'].apply(clean_str)
+        else:
+            st.error("❌ No se encontró la columna 'RH' en el Catálogo.")
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            
+    except Exception as e:
+        st.error(f"Error cargando Catálogo: {e}")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    catalogo_piezas = df_cat['PIEZA_KEY'].unique().tolist()
+
+    # --- B. CARGAR FORMS ---
+    def fetch_forms(url, tipo_mant):
+        try:
+            df_raw = pd.read_csv(url)
+            if df_raw.empty: return pd.DataFrame()
+
+            header_idx = -1
+            for i, row in df_raw.iterrows():
+                row_vals = " ".join([str(x).upper() for x in row.values])
+                if 'MARCA TEMPORAL' in row_vals or 'FECHA' in row_vals:
+                    header_idx = i
+                    break
+            
+            if header_idx != -1:
+                df_raw = pd.read_csv(url, skiprows=header_idx + 1)
+            
+            df_raw.columns = [str(c).upper().strip() for c in df_raw.columns]
+            
+            col_f = next((c for c in df_raw.columns if 'FECHA' in c or 'MARCA TEMPORAL' in c), None)
+            palabras_clave_pieza = ['PIEZA', 'RH', 'LH', 'MATRIZ', 'CÓDIGO']
+            cols_pieza = [c for c in df_raw.columns if any(k in c for k in palabras_clave_pieza)]
+            cols_term = [c for c in df_raw.columns if 'TERMINADO' in c or 'TERMINO' in c or 'ESTADO' in c]
+            
+            if not col_f or not cols_pieza:
+                return pd.DataFrame()
+
+            registros = []
+            for _, row in df_raw.iterrows():
+                fecha = pd.to_datetime(row.get(col_f), dayfirst=True, errors='coerce') if col_f else pd.NaT
+                if pd.isna(fecha): continue
+                
+                pieza_raw = ""
+                for cp in cols_pieza:
+                    val = clean_str(row.get(cp))
+                    if val and val not in ['NAN', 'NONE', '-', '0', 'N/A', '']:
+                        pieza_raw = val
+                        break 
+                
+                if not pieza_raw: continue
+                
+                # REGLA: Si alguna columna dice SI, todo el registro es SI (cerrado). Sino, NO (abierto)
+                terminado = 'NO'
+                for ct in cols_term:
+                    val_t = clean_str(row.get(ct))
+                    if val_t in ['SI', 'SÍ', 'VERDADERO']:
+                        terminado = 'SI'
                         break
                 
-            for i, col_name in enumerate(cols):
-                base_col = col_name.split('.')[0].strip()
-                if base_col in VALID_PIEZA_COLS:
-                    pieza_completa = clean_str(row.iloc[i])
-                    if pieza_completa and pieza_completa not in ['NAN', 'NONE', '-', '0', 'N/A', 'NO APLICA', '']:
-                        pieza_match = get_match_key(pieza_completa)
-                        op = ""
-                        for j in range(i+1, min(i+4, len(cols))):
-                            next_col = cols[j].split('.')[0].strip()
-                            if 'OPERACION' in next_col or 'OPERACIÓN' in next_col or 'OP' == next_col:
-                                op = clean_str(row.iloc[j])
-                                break
-                        registros.append({
-                            'Fecha': fecha, 
-                            'Pieza_Match': pieza_match, 
-                            'OP': op, 
-                            'Tipo_Mant': tipo_mant, 
-                            'Terminado': estado_terminado
-                        })
-        return pd.DataFrame(registros)
-    except Exception as e:
-        st.error(f"❌ Error al extraer datos de {tipo_mant}: {e}")
-        return pd.DataFrame()
+                pieza_key = get_best_match(pieza_raw, catalogo_piezas)
 
-@st.cache_data(ttl=300)
-def load_all_data():
-    df_cat = pd.read_csv(URL_CATALOGO)
-    df_cat.columns = df_cat.columns.astype(str).str.replace('\n', ' ').str.replace('\r', '').str.strip()
-    df_cat.columns = df_cat.columns.str.replace(r'\s+', ' ', regex=True)
-    col_activo = next((c for c in df_cat.columns if 'ACTIVO' in c.upper()), None)
-    if col_activo:
-        df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
-    
-    df_prod = pd.read_csv(URL_PRODUCCION)
-    df_prod.columns = df_prod.columns.astype(str).str.strip()
-    col_fecha_prod = next((c for c in df_prod.columns if 'fecha' in c.lower() and 'inicio' not in c.lower()), None)
-    df_prod['Fecha'] = pd.to_datetime(df_prod[col_fecha_prod], dayfirst=True, errors='coerce') if col_fecha_prod else pd.NaT
-    
-    col_buenas = next((c for c in df_prod.columns if 'buenas' in c.lower()), None)
-    col_retrabajo = next((c for c in df_prod.columns if 'retrabajo' in c.lower()), None)
-    df_prod['Buenas_Num'] = pd.to_numeric(df_prod[col_buenas].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0) if col_buenas else 0
-    df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod[col_retrabajo].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0) if col_retrabajo else 0
-    df_prod['Golpes_Totales'] = df_prod['Buenas_Num'] + df_prod['Retrabajo_Num']
-    
-    col_pieza_prod = next((c for c in df_prod.columns if 'código producto' in c.lower() or 'codigo producto' in c.lower() or 'pieza' in c.lower()), None)
-    df_prod['Pieza_Match'] = df_prod[col_pieza_prod].apply(lambda x: get_match_key(clean_str(x))) if col_pieza_prod else "" 
-    
-    df_prev = extract_mantenimientos(URL_PREV_FAMMA, "PREV")
-    df_corr = extract_mantenimientos(URL_CORR_FAMMA, "CORR")
-    return df_cat, df_prod, pd.concat([df_prev, df_corr], ignore_index=True)
+                registros.append({
+                    'FECHA_DT': fecha, 'TIPO_MANT': tipo_mant, 'TERMINADO': terminado,
+                    'PIEZA_RAW': pieza_raw, 'PIEZA_KEY': pieza_key
+                })
+            return pd.DataFrame(registros)
+        except Exception as e:
+            return pd.DataFrame()
+
+    df_prev = fetch_forms(URL_FORMS_PREV, "PREV")
+    df_corr = fetch_forms(URL_FORMS_CORR, "CORR")
+    df_forms_all = pd.concat([df_prev, df_corr], ignore_index=True) if not df_prev.empty or not df_corr.empty else pd.DataFrame()
+
+    # --- C. SQL (PRODUCCIÓN) ---
+    try:
+        conn = st.connection("wii_bi", type="sql")
+        q = "SELECT pr.Code as PIEZA, CAST(p.Date as DATE) as FECHA, SUM(p.Good + p.Rework) as GOLPES FROM PROD_D_01 p JOIN PRODUCT pr ON p.ProductId = pr.ProductId WHERE p.Date >= '2023-01-01' GROUP BY pr.Code, CAST(p.Date as DATE)"
+        df_sql = conn.query(q)
+        df_sql['FECHA'] = pd.to_datetime(df_sql['FECHA'])
+        
+        piezas_unicas_sql = df_sql['PIEZA'].unique()
+        mapeo_piezas = {p: get_best_match(p, catalogo_piezas) for p in piezas_unicas_sql}
+        df_sql['PIEZA_KEY'] = df_sql['PIEZA'].map(mapeo_piezas)
+    except: 
+        df_sql = pd.DataFrame()
+
+    return df_cat, df_sql, df_forms_all
 
 # ==========================================
-# 4. MOTOR DE CRUCE Y CÁLCULO
+# 4. LÓGICA DE PROCESAMIENTO
 # ==========================================
-def procesar_estado_matrices(df_cat, df_prod, df_mant):
-    resultados = []
-    abiertos = []
-    col_pieza = next((c for c in df_cat.columns if c.upper() == 'PIEZA'), 'PIEZA')
-    col_op = next((c for c in df_cat.columns if c.upper() == 'OP'), 'OP')
-    col_cliente = next((c for c in df_cat.columns if 'CLIENTE' in c.upper()), 'CLIENTE')
-    col_tipo = next((c for c in df_cat.columns if 'TIPO' in c.upper()), 'TIPO')
-    col_limite = next((c for c in df_cat.columns if 'GOLPES PARA MANTENIMIENTO' in c.upper()), 'GOLPES PARA MANTENIMIENTO')
-    col_alerta = next((c for c in df_cat.columns if 'ALERTA' in c.upper()), 'ALERTA')
-    col_prev = next((c for c in df_cat.columns if 'ULTIMO PREVENTIVO' in c.upper()), 'ULTIMO PREVENTIVO')
-    col_corr = next((c for c in df_cat.columns if 'ULTIMO CORRECTIVO' in c.upper()), 'ULTIMO CORRECTIVO')
+def procesar_datos(df_cat, df_sql, df_forms):
+    res_semaforo = []
+    res_abiertos = []
+    hoy = datetime.now()
+    inicio_anio = pd.to_datetime(f"{hoy.year}-01-01")
 
     for _, row in df_cat.iterrows():
-        pieza_completa = clean_str(row.get(col_pieza, ''))
-        op = clean_str(row.get(col_op, ''))
-        if not pieza_completa or pieza_completa == 'NAN': continue
-        pieza_match = get_match_key(pieza_completa)
+        p_key = row['PIEZA_KEY']
+        if not row['RH'] or row['RH'] == '-': continue
         
-        limite_mant = pd.to_numeric(row.get(col_limite, 0), errors='coerce') or 20000
-        limite_alerta = pd.to_numeric(row.get(col_alerta, 0), errors='coerce') or (limite_mant * 0.8)
-        
-        fecha_prev, fecha_corr, fecha_abierto = pd.NaT, pd.NaT, pd.NaT
-        tiene_abierto, tipo_abierto = False, ""
-        
-        if col_prev: fecha_prev = pd.to_datetime(row.get(col_prev), dayfirst=True, errors='coerce')
-        if col_corr: fecha_corr = pd.to_datetime(row.get(col_corr), dayfirst=True, errors='coerce')
+        f_excel = pd.to_datetime(row.get('ULTIMO MANTENIMIENTO'), dayfirst=True, errors='coerce')
+        g_base = pd.to_numeric(row.get('GOLPES'), errors='coerce')
+        g_base = g_base if pd.notna(g_base) else 0
 
-        if not df_mant.empty:
-            match = df_mant[(df_mant['Pieza_Match'] == pieza_match) & (df_mant['OP'] == op)]
-            
-            term = match[match['Terminado'] == 'SI']
-            max_fecha_cerrado = pd.NaT
-            if not term.empty:
-                max_fecha_cerrado = term['Fecha'].max()
-                max_p = term[term['Tipo_Mant'] == 'PREV']['Fecha'].max()
-                max_c = term[term['Tipo_Mant'] == 'CORR']['Fecha'].max()
-                if pd.notna(max_p) and (pd.isna(fecha_prev) or max_p > fecha_prev): fecha_prev = max_p
-                if pd.notna(max_c) and (pd.isna(fecha_corr) or max_c > fecha_corr): fecha_corr = max_c
+        # Lógica de Mantenimientos por Pieza
+        f_prev = pd.NaT
+        f_corr = pd.NaT
+        tiene_abierto = False
+        fecha_abierto = pd.NaT
+        tipo_abierto = ""
+
+        if not df_forms.empty:
+            match_f = df_forms[df_forms['PIEZA_KEY'] == p_key].copy()
+            if not match_f.empty:
+                match_f = match_f.sort_values('FECHA_DT')
                 
-            ab = match[match['Terminado'] == 'NO']
-            if not ab.empty:
-                max_fecha_abierto = ab['Fecha'].max()
-                if pd.isna(max_fecha_cerrado) or max_fecha_abierto > max_fecha_cerrado:
+                # REGLA: Comprobar el ÚLTIMO registro cronológico
+                last_record = match_f.iloc[-1]
+                if last_record['TERMINADO'] == 'NO':
                     tiene_abierto = True
-                    fecha_abierto = max_fecha_abierto
-                    tipo_abierto = ab.loc[ab['Fecha'].idxmax(), 'Tipo_Mant']
+                    fecha_abierto = last_record['FECHA_DT']
+                    tipo_abierto = last_record['TIPO_MANT']
 
-        fecha_base = pd.NaT
-        if pd.notna(fecha_prev) and pd.notna(fecha_corr): fecha_base = max(fecha_prev, fecha_corr)
-        elif pd.notna(fecha_prev): fecha_base = fecha_prev
-        elif pd.notna(fecha_corr): fecha_base = fecha_corr
+                # Obtener la fecha de los cerrados
+                cerrados = match_f[match_f['TERMINADO'] == 'SI']
+                if not cerrados.empty:
+                    max_p = cerrados[cerrados['TIPO_MANT'] == 'PREV']['FECHA_DT'].max()
+                    max_c = cerrados[cerrados['TIPO_MANT'] == 'CORR']['FECHA_DT'].max()
+                    if pd.notna(max_p): f_prev = max_p
+                    if pd.notna(max_c): f_corr = max_c
 
-        prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
-        if pd.notna(fecha_base):
-            prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
+        # Establecer la fecha de corte para sumar golpes
+        fechas_validas = [f for f in [f_prev, f_corr, f_excel] if pd.notna(f)]
+        f_final = max(fechas_validas) if fechas_validas else pd.NaT
+
+        if pd.notna(f_final):
+            if pd.notna(f_excel) and f_final == f_excel:
+                prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= inicio_anio)] if not df_sql.empty else pd.DataFrame()
+                g_total = int(g_base) + (int(prod['GOLPES'].sum()) if not prod.empty else 0)
+            else:
+                prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= f_final)] if not df_sql.empty else pd.DataFrame()
+                g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
+        else:
+            prod = df_sql[(df_sql['PIEZA_KEY'] == p_key) & (df_sql['FECHA'] >= inicio_anio)] if not df_sql.empty else pd.DataFrame()
+            g_total = int(g_base) + (int(prod['GOLPES'].sum()) if not prod.empty else 0)
+
+        limite = 20000
+        color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
+        estado = "MANT. REQUERIDO" if color == "ROJO" else "ALERTA PREVENTIVO" if color == "AMARILLO" else "OK"
         
-        golpes_totales = int(prod_match['Golpes_Totales'].sum())
-        
-        color, estado = "VERDE", "OK"
-        if golpes_totales >= limite_mant: color, estado = "ROJO", "MANT. REQUERIDO"
-        elif golpes_totales >= limite_alerta: color, estado = "AMARILLO", "ALERTA PREVENTIVO"
-            
-        resultados.append({
-            'CLIENTE': clean_str(row.get(col_cliente, '-')), 'PIEZA': pieza_completa, 'OP': op,
-            'TIPO': clean_str(row.get(col_tipo, '-')), 'ULT_PREV': fecha_prev.strftime('%d/%m/%y') if pd.notna(fecha_prev) else "-",
-            'ULT_CORR': fecha_corr.strftime('%d/%m/%y') if pd.notna(fecha_corr) else "-",
-            'GOLPES': golpes_totales, 'LIMITE': int(limite_mant), 'ESTADO': estado, 'COLOR': color
+        # Guardamos en formato compatible para la generación PDF
+        res_semaforo.append({
+            'CLIENTE': row.get('CLIENTE', '-'), 'PIEZA': row['RH'], 'OP': '-', 'TIPO': '-',
+            'ULT_PREV': f_prev.strftime('%d/%m/%y') if pd.notna(f_prev) else "-",
+            'ULT_CORR': f_corr.strftime('%d/%m/%y') if pd.notna(f_corr) else "-",
+            'GOLPES': g_total, 'LIMITE': limite, 'ESTADO': estado, 'COLOR': color
         })
+
         if tiene_abierto:
-            abiertos.append({'CLIENTE': clean_str(row.get(col_cliente, '-')), 'PIEZA': pieza_completa, 'OP': op,
-                             'TIPO': clean_str(row.get(col_tipo, '-')), 'TIPO_MANT_ABIERTO': tipo_abierto, 'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')})
-            
-    return pd.DataFrame(resultados), pd.DataFrame(abiertos)
+            res_abiertos.append({
+                'CLIENTE': row.get('CLIENTE', '-'), 'PIEZA': row['RH'], 'OP': '-', 'TIPO': '-',
+                'TIPO_MANT_ABIERTO': tipo_abierto, 'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')
+            })
+
+    return pd.DataFrame(res_semaforo), pd.DataFrame(res_abiertos)
 
 # ==========================================
-# 5. GENERACIÓN DEL PDF (FPDF)
+# 5. GENERACIÓN DEL PDF (FPDF Y PLOTLY)
 # ==========================================
 class PDFGolpes(FPDF):
     def header(self):
         self.set_font("Arial", 'B', 15)
         self.set_text_color(31, 73, 125)
-        self.cell(0, 10, "Control de Golpes de Matrices (Detalle Principal)", border=0, ln=True, align='C')
+        self.cell(0, 10, "Control de Golpes de Matrices (Fumiscor)", border=0, ln=True, align='C')
         self.set_font("Arial", 'I', 9)
         self.set_text_color(100, 100, 100)
         hora_arg = datetime.utcnow() - timedelta(hours=3)
@@ -243,12 +282,10 @@ class PDFResumen(FPDF):
         self.set_font("Arial", "I", 8)
         self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
-
 def build_pdf_main(df_resultados, df_abiertos):
-    """Genera el reporte principal: Detalle de piezas y Mantenimientos Abiertos (Hojas separadas)."""
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
     
-    # --- HOJA 1: DETALLE DE GOLPES ---
+    # --- HOJA 1: DETALLE ---
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
@@ -283,9 +320,9 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
         pdf.cell(72, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
 
-    # --- HOJA 2: MANTENIMIENTOS ABIERTOS ---
+    # --- HOJA 2: ABIERTOS ---
     if not df_abiertos.empty:
-        pdf.add_page() # Salto estricto a una nueva hoja para los mantenimientos abiertos
+        pdf.add_page()
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0)
         pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de Cierre)", ln=True)
         pdf.ln(3)
@@ -297,11 +334,11 @@ def build_pdf_main(df_resultados, df_abiertos):
         pdf.cell(35, 8, "Fecha Apertura", 1, 1, 'C', fill=True)
         pdf.set_font("Arial", '', 8); pdf.set_text_color(0, 0, 0)
         for _, r in df_abiertos.iterrows():
-            pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C')
-            pdf.cell(90, 7, r['PIEZA'], 1, 0, 'L')
-            pdf.cell(15, 7, r['OP'], 1, 0, 'C')
-            pdf.cell(35, 7, r['TIPO_MANT_ABIERTO'], 1, 0, 'C')
-            pdf.cell(35, 7, r['FECHA_APERTURA'], 1, 1, 'C')
+            pdf.cell(25, 7, str(r['CLIENTE']), 1, 0, 'C')
+            pdf.cell(90, 7, str(r['PIEZA']), 1, 0, 'L')
+            pdf.cell(15, 7, str(r['OP']), 1, 0, 'C')
+            pdf.cell(35, 7, str(r['TIPO_MANT_ABIERTO']), 1, 0, 'C')
+            pdf.cell(35, 7, str(r['FECHA_APERTURA']), 1, 1, 'C')
 
     buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     pdf.output(buf.name)
@@ -310,7 +347,6 @@ def build_pdf_main(df_resultados, df_abiertos):
     return b
 
 def build_pdf_resumen(df_resultados):
-    """Genera exclusivamente el reporte de Estado General concentrado en UNA SOLA HOJA."""
     pdf = PDFResumen(orientation='L', unit='mm', format='A4')
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
@@ -333,15 +369,15 @@ def build_pdf_resumen(df_resultados):
                 'PNOK': f"{int(round(nok/tot*100))}%"
             })
 
-    # --- 1. TABLA RESUMEN CON FORMATO MÁS COMPACTO ---
+    # --- TABLA RESUMEN ---
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     mx = 43.5; pdf.set_x(mx)
     pdf.cell(35, 6, "CLIENTE", 1, 0, 'C', fill=True)
-    pdf.cell(25, 6, "TOTAL OP", 1, 0, 'C', fill=True)
-    pdf.cell(35, 6, "CON PREV.", 1, 0, 'C', fill=True)
-    pdf.cell(35, 6, "SIN MANT.", 1, 0, 'C', fill=True)
-    pdf.cell(40, 6, "% PREV", 1, 0, 'C', fill=True)
-    pdf.cell(40, 6, "% SIN MANT", 1, 1, 'C', fill=True)
+    pdf.cell(25, 6, "TOTAL PIEZAS", 1, 0, 'C', fill=True)
+    pdf.cell(35, 6, "OK / CON PREV.", 1, 0, 'C', fill=True)
+    pdf.cell(35, 6, "ALERTA / VENCIDO", 1, 0, 'C', fill=True)
+    pdf.cell(40, 6, "% OK", 1, 0, 'C', fill=True)
+    pdf.cell(40, 6, "% NO OK", 1, 1, 'C', fill=True)
     
     pdf.set_font("Arial", '', 9); pdf.set_text_color(0, 0, 0)
     for r in resumen_data:
@@ -361,21 +397,19 @@ def build_pdf_resumen(df_resultados):
     pdf.cell(40, 6, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
     pdf.cell(40, 6, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
     
-    # --- 2. GRÁFICOS DE TORTA (GENERAL + CLIENTES) EN LA MISMA HOJA ---
+    # --- GRÁFICOS (PLOTLY) ---
     if len(resumen_data) > 0:
         pdf.ln(5)
         y_charts = pdf.get_y()
         
-        # Gráfico 1: Torta General
         fig_gen = go.Figure(data=[go.Pie(
-            labels=['CON PREVENTIVO', 'SIN MANT.'], 
+            labels=['EN REGLA', 'VENCIDO/ALERTA'], 
             values=[total_ok, total_nok], 
             marker_colors=['#2ca02c', '#d62728']
         )])
         fig_gen.update_traces(textposition='inside', textinfo='percent+label', showlegend=False)
-        fig_gen.update_layout(title_text="Matrices Totales", title_x=0.5, margin=dict(t=40, b=10, l=10, r=10), height=300, width=300)
+        fig_gen.update_layout(title_text="Estado General (Total)", title_x=0.5, margin=dict(t=40, b=10, l=10, r=10), height=300, width=300)
 
-        # Gráfico 2: Tortas por Cliente (Subplots)
         fig_cli = make_subplots(
             rows=1, cols=len(resumen_data), 
             specs=[[{'type':'domain'}] * len(resumen_data)], 
@@ -383,7 +417,7 @@ def build_pdf_resumen(df_resultados):
         )
         for i, r in enumerate(resumen_data):
             fig_cli.add_trace(go.Pie(
-                labels=['CON PREVENTIVO', 'SIN MANT.'], 
+                labels=['EN REGLA', 'VENCIDO/ALERTA'], 
                 values=[r['OK'], r['NOK']], 
                 marker_colors=['#2ca02c', '#d62728']
             ), 1, i + 1)
@@ -394,17 +428,15 @@ def build_pdf_resumen(df_resultados):
             showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5), 
             margin=dict(t=40, b=40, l=10, r=10), height=300, width=700
         )
-        fig_cli.update_annotations(font_size=12) # Ajusta el texto del nombre del cliente
         
-        # Inserción de imágenes de manera horizontal
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_gen:
             fig_gen.write_image(tmp_gen.name, engine="kaleido")
-            pdf.image(tmp_gen.name, x=15, y=y_charts, w=70) # Torta General a la izquierda
+            pdf.image(tmp_gen.name, x=15, y=y_charts, w=70) 
             os.remove(tmp_gen.name)
             
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_cli:
             fig_cli.write_image(tmp_cli.name, engine="kaleido")
-            pdf.image(tmp_cli.name, x=90, y=y_charts, w=190) # Tortas Clientes a la derecha
+            pdf.image(tmp_cli.name, x=90, y=y_charts, w=190) 
             os.remove(tmp_cli.name)
     
     buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
@@ -414,38 +446,25 @@ def build_pdf_resumen(df_resultados):
     return b
 
 # ==========================================
-# 6. INTERFAZ DE STREAMLIT
+# 6. INTERFAZ Y BOTONES DE DESCARGA
 # ==========================================
-
-if st.button("🔄 Forzar Actualización de Datos (Borrar Caché)", use_container_width=True):
+if st.button("🔄 Sincronizar Bases y Limpiar Caché", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
-with st.spinner("Conectando y descargando bases de datos..."):
-    try:
-        df_cat_raw, df_prod_raw, df_mant_raw = load_all_data()
-        datos_listos = True
-    except Exception as e:
-        st.error(f"Error critico: {e}")
-        datos_listos = False
+with st.spinner("Conectando con Google Sheets y SQL..."):
+    df_cat, df_sql, df_forms = load_all_sources()
 
-if datos_listos:
-    st.success("Bases de datos sincronizadas exitosamente.")
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.info("Reporte oficial de control de golpes. Cruza catálogo activo con producción acumulada.")
+if not df_cat.empty:
+    with st.expander("🛠️ PANEL DE DIAGNÓSTICO INTERNO"):
+        st.write(f"Total filas en Catálogo: {len(df_cat)} | Total filas SQL: {len(df_sql)} | Total forms: {len(df_forms)}")
         
-    with col2:
-        if st.button("⚙️ Procesar Datos de Matrices", use_container_width=True, type="primary"):
-            with st.spinner("Calculando estado de matrices..."):
-                df_res, df_abiertos = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
-                
-                # Guardamos los resultados en el estado de la sesión para mostrarlos y descargarlos
-                st.session_state['df_res'] = df_res
-                st.session_state['df_abiertos'] = df_abiertos
+    if st.button("⚙️ Procesar Datos de Matrices y Generar PDFs", use_container_width=True, type="primary"):
+        with st.spinner("Calculando estado de matrices y renderizando documentos..."):
+            df_res, df_abiertos = procesar_datos(df_cat, df_sql, df_forms)
+            st.session_state['df_res'] = df_res
+            st.session_state['df_abiertos'] = df_abiertos
 
-    # Si los datos ya fueron procesados, mostramos botones de descarga
     if 'df_res' in st.session_state and not st.session_state['df_res'].empty:
         df_res = st.session_state['df_res']
         df_abiertos = st.session_state['df_abiertos']
@@ -458,7 +477,6 @@ if datos_listos:
         st.write(f"**Resumen de la corrida:** 🔴 {rojos} Críticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
         
         col_desc1, col_desc2 = st.columns(2)
-        
         h = datetime.utcnow() - timedelta(hours=3)
         fecha_str = h.strftime('%d%m%Y')
         
@@ -481,5 +499,3 @@ if datos_listos:
                 mime="application/pdf", 
                 use_container_width=True
             )
-    elif 'df_res' in st.session_state and st.session_state['df_res'].empty:
-        st.warning("No hay datos activos en el catálogo.")
