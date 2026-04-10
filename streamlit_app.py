@@ -254,7 +254,7 @@ class PDFGolpes(FPDF):
     def header(self):
         self.set_font("Arial", 'B', 15)
         self.set_text_color(31, 73, 125)
-        self.cell(0, 10, "Control de Golpes de Matrices (Fumiscor)", border=0, ln=True, align='C')
+        self.cell(0, 10, "Resumen de Golpes", border=0, ln=True, align='C')
         self.set_font("Arial", 'I', 9)
         self.set_text_color(100, 100, 100)
         hora_arg = datetime.utcnow() - timedelta(hours=3)
@@ -270,7 +270,7 @@ class PDFResumen(FPDF):
     def header(self):
         self.set_font("Arial", 'B', 15)
         self.set_text_color(31, 73, 125)
-        self.cell(0, 10, "Estado General del Mantenimiento Preventivo", border=0, ln=True, align='C')
+        self.cell(0, 10, "Estado de los Mantenimientos de Matrices Fumiscor", border=0, ln=True, align='C')
         self.set_font("Arial", 'I', 9)
         self.set_text_color(100, 100, 100)
         hora_arg = datetime.utcnow() - timedelta(hours=3)
@@ -483,9 +483,9 @@ if not df_cat.empty:
         with col_desc1:
             pdf_main_data = build_pdf_main(df_res, df_abiertos)
             st.download_button(
-                label="📥 Descargar Reporte Principal (Detalles y Pendientes)", 
+                label="📥 Descargar Resumen de Golpes", 
                 data=pdf_main_data, 
-                file_name=f"Reporte_Golpes_Detalle_{fecha_str}.pdf", 
+                file_name=f"Resumen_de_Golpes_{fecha_str}.pdf", 
                 mime="application/pdf", 
                 use_container_width=True
             )
@@ -493,9 +493,9 @@ if not df_cat.empty:
         with col_desc2:
             pdf_resumen_data = build_pdf_resumen(df_res)
             st.download_button(
-                label="📊 Descargar Resumen General (Tabla y Gráficos)", 
+                label="📊 Descargar Estado de los Mantenimientos de Matrices Fumiscor", 
                 data=pdf_resumen_data, 
-                file_name=f"Reporte_Golpes_Resumen_{fecha_str}.pdf", 
+                file_name=f"Estado_de_los_mantenimientos_de_matrices_fumiscor_{fecha_str}.pdf", 
                 mime="application/pdf", 
                 use_container_width=True
             )
