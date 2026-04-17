@@ -105,7 +105,7 @@ def extract_mantenimientos(url, tipo_mant):
 
 @st.cache_data(ttl=300)
 def load_all_data():
-    # --- CARGA DE CATÁLOGO (Google Sheets) ---
+    # --- 1. CARGA DE CATÁLOGO (Google Sheets) ---
     df_cat = pd.read_csv(URL_CATALOGO)
     df_cat.columns = df_cat.columns.astype(str).str.replace('\n', ' ').str.replace('\r', '').str.strip()
     df_cat.columns = df_cat.columns.str.replace(r'\s+', ' ', regex=True)
@@ -113,9 +113,19 @@ def load_all_data():
     if col_activo:
         df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
     
-    # --- CARGA DE PRODUCCIÓN (SQL Server) ---
-    # REEMPLAZA EL NOMBRE DE LA TABLA AQUÍ ABAJO:
-    QUERY_SQL = "SELECT * FROM tu_tabla_de_produccion" 
+    # --- 2. CARGA DE PRODUCCIÓN (SQL Server) ---
+    # Usamos PROD_M_01 y la cruzamos con PRODUCT (se filtra desde 2024 para optimizar)
+    QUERY_SQL = """
+        SELECT 
+            p.Year,
+            p.Month,
+            pr.Code as Codigo_Pieza,
+            COALESCE(p.Good, 0) as Buenas,
+            COALESCE(p.Rework, 0) as Retrabajo
+        FROM PROD_M_01 p
+        LEFT JOIN PRODUCT pr ON p.ProductId = pr.ProductId
+        WHERE p.Year >= 2024
+    """ 
 
     try:
         conn = st.connection("wii_bi", type="sql")
@@ -123,25 +133,22 @@ def load_all_data():
             
         df_prod.columns = df_prod.columns.astype(str).str.strip()
         
-        col_fecha_prod = next((c for c in df_prod.columns if 'fecha' in c.lower() and 'inicio' not in c.lower()), None)
-        df_prod['Fecha'] = pd.to_datetime(df_prod[col_fecha_prod], errors='coerce') if col_fecha_prod else pd.NaT
+        # Construimos una fecha al día 1 del mes de producción para tener una referencia temporal
+        df_prod['Fecha'] = pd.to_datetime(df_prod['Year'].astype(str) + '-' + df_prod['Month'].astype(str) + '-01', errors='coerce')
         
-        col_buenas = next((c for c in df_prod.columns if 'buenas' in c.lower()), None)
-        col_retrabajo = next((c for c in df_prod.columns if 'retrabajo' in c.lower()), None)
-        
-        # Asumiendo que SQL Server devuelve numéricos. Si devuelve texto con comas, deberás agregar .astype(str).str.replace(...)
-        df_prod['Buenas_Num'] = pd.to_numeric(df_prod[col_buenas], errors='coerce').fillna(0) if col_buenas else 0
-        df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod[col_retrabajo], errors='coerce').fillna(0) if col_retrabajo else 0
+        # Procesamos los datos numéricos de producción
+        df_prod['Buenas_Num'] = pd.to_numeric(df_prod['Buenas'], errors='coerce').fillna(0)
+        df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod['Retrabajo'], errors='coerce').fillna(0)
         df_prod['Golpes_Totales'] = df_prod['Buenas_Num'] + df_prod['Retrabajo_Num']
         
-        col_pieza_prod = next((c for c in df_prod.columns if 'código producto' in c.lower() or 'codigo producto' in c.lower() or 'pieza' in c.lower()), None)
-        df_prod['Pieza_Match'] = df_prod[col_pieza_prod].apply(lambda x: get_match_key(clean_str(x))) if col_pieza_prod else "" 
+        # Hacemos el match key para cruzar con el catálogo
+        df_prod['Pieza_Match'] = df_prod['Codigo_Pieza'].apply(lambda x: get_match_key(clean_str(x))) 
         
     except Exception as e:
         st.error(f"❌ Error al conectar o extraer datos de SQL Server: {e}")
         df_prod = pd.DataFrame() 
 
-    # --- CARGA DE MANTENIMIENTOS (Google Sheets) ---
+    # --- 3. CARGA DE MANTENIMIENTOS (Google Sheets) ---
     df_prev = extract_mantenimientos(URL_PREV_FAMMA, "PREV")
     df_corr = extract_mantenimientos(URL_CORR_FAMMA, "CORR")
     
