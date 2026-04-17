@@ -39,7 +39,8 @@ VALID_PIEZA_COLS = [
 # ==========================================
 def clean_str(val):
     if pd.isna(val): return ""
-    v = str(val).strip().upper()
+    # Blindaje contra saltos de línea que rompen el PDF
+    v = str(val).replace('\n', ' ').replace('\r', '').strip().upper()
     if v.endswith('.0'): v = v[:-2]
     return v
 
@@ -114,7 +115,7 @@ def load_all_data():
         df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
     
     # --- 2. CARGA DE PRODUCCIÓN (SQL Server) ---
-    # Usamos PROD_M_01 y la cruzamos con PRODUCT (se filtra desde 2024 para optimizar)
+    # Sin límite de año para recuperar el historial completo
     QUERY_SQL = """
         SELECT 
             p.Year,
@@ -124,7 +125,6 @@ def load_all_data():
             COALESCE(p.Rework, 0) as Retrabajo
         FROM PROD_M_01 p
         LEFT JOIN PRODUCT pr ON p.ProductId = pr.ProductId
-        WHERE p.Year >= 2024
     """ 
 
     try:
@@ -211,7 +211,9 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
 
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         if pd.notna(fecha_base):
-            prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
+            # Normalizamos al primer día del mes para cruzar correctamente con los datos mensuales de SQL
+            fecha_base_mes = fecha_base.replace(day=1)
+            prod_match = prod_match[prod_match['Fecha'] >= fecha_base_mes]
         
         golpes_totales = int(prod_match['Golpes_Totales'].sum())
         
