@@ -19,14 +19,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Reporte Auxiliar: Control de Golpes de Matrices (FAMMA)</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Producción y Mantenimiento.</p>", unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Producción (SQL Server) y Mantenimiento.</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
 # 2. ENLACES DE GOOGLE SHEETS
 # ==========================================
 URL_CATALOGO = "https://docs.google.com/spreadsheets/d/1feaeFLl2UslCsO4mzldUVFuhY1bdnUiQPatRM2m0sW0/export?format=csv&gid=1862158700"
-URL_PRODUCCION = "https://docs.google.com/spreadsheets/d/1c4aEFtCS-sJZFcH6iLb8AdBVsPrz0pNWayHR2-Dhfm8/export?format=csv&gid=315437448"
 URL_PREV_FAMMA = "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888"
 URL_CORR_FAMMA = "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679"
 
@@ -106,6 +105,7 @@ def extract_mantenimientos(url, tipo_mant):
 
 @st.cache_data(ttl=300)
 def load_all_data():
+    # --- CARGA DE CATÁLOGO (Google Sheets) ---
     df_cat = pd.read_csv(URL_CATALOGO)
     df_cat.columns = df_cat.columns.astype(str).str.replace('\n', ' ').str.replace('\r', '').str.strip()
     df_cat.columns = df_cat.columns.str.replace(r'\s+', ' ', regex=True)
@@ -113,22 +113,38 @@ def load_all_data():
     if col_activo:
         df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
     
-    df_prod = pd.read_csv(URL_PRODUCCION)
-    df_prod.columns = df_prod.columns.astype(str).str.strip()
-    col_fecha_prod = next((c for c in df_prod.columns if 'fecha' in c.lower() and 'inicio' not in c.lower()), None)
-    df_prod['Fecha'] = pd.to_datetime(df_prod[col_fecha_prod], dayfirst=True, errors='coerce') if col_fecha_prod else pd.NaT
-    
-    col_buenas = next((c for c in df_prod.columns if 'buenas' in c.lower()), None)
-    col_retrabajo = next((c for c in df_prod.columns if 'retrabajo' in c.lower()), None)
-    df_prod['Buenas_Num'] = pd.to_numeric(df_prod[col_buenas].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0) if col_buenas else 0
-    df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod[col_retrabajo].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0) if col_retrabajo else 0
-    df_prod['Golpes_Totales'] = df_prod['Buenas_Num'] + df_prod['Retrabajo_Num']
-    
-    col_pieza_prod = next((c for c in df_prod.columns if 'código producto' in c.lower() or 'codigo producto' in c.lower() or 'pieza' in c.lower()), None)
-    df_prod['Pieza_Match'] = df_prod[col_pieza_prod].apply(lambda x: get_match_key(clean_str(x))) if col_pieza_prod else "" 
-    
+    # --- CARGA DE PRODUCCIÓN (SQL Server) ---
+    # REEMPLAZA EL NOMBRE DE LA TABLA AQUÍ ABAJO:
+    QUERY_SQL = "SELECT * FROM tu_tabla_de_produccion" 
+
+    try:
+        conn = st.connection("wii_bi", type="sql")
+        df_prod = conn.query(QUERY_SQL)
+            
+        df_prod.columns = df_prod.columns.astype(str).str.strip()
+        
+        col_fecha_prod = next((c for c in df_prod.columns if 'fecha' in c.lower() and 'inicio' not in c.lower()), None)
+        df_prod['Fecha'] = pd.to_datetime(df_prod[col_fecha_prod], errors='coerce') if col_fecha_prod else pd.NaT
+        
+        col_buenas = next((c for c in df_prod.columns if 'buenas' in c.lower()), None)
+        col_retrabajo = next((c for c in df_prod.columns if 'retrabajo' in c.lower()), None)
+        
+        # Asumiendo que SQL Server devuelve numéricos. Si devuelve texto con comas, deberás agregar .astype(str).str.replace(...)
+        df_prod['Buenas_Num'] = pd.to_numeric(df_prod[col_buenas], errors='coerce').fillna(0) if col_buenas else 0
+        df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod[col_retrabajo], errors='coerce').fillna(0) if col_retrabajo else 0
+        df_prod['Golpes_Totales'] = df_prod['Buenas_Num'] + df_prod['Retrabajo_Num']
+        
+        col_pieza_prod = next((c for c in df_prod.columns if 'código producto' in c.lower() or 'codigo producto' in c.lower() or 'pieza' in c.lower()), None)
+        df_prod['Pieza_Match'] = df_prod[col_pieza_prod].apply(lambda x: get_match_key(clean_str(x))) if col_pieza_prod else "" 
+        
+    except Exception as e:
+        st.error(f"❌ Error al conectar o extraer datos de SQL Server: {e}")
+        df_prod = pd.DataFrame() 
+
+    # --- CARGA DE MANTENIMIENTOS (Google Sheets) ---
     df_prev = extract_mantenimientos(URL_PREV_FAMMA, "PREV")
     df_corr = extract_mantenimientos(URL_CORR_FAMMA, "CORR")
+    
     return df_cat, df_prod, pd.concat([df_prev, df_corr], ignore_index=True)
 
 # ==========================================
@@ -243,7 +259,6 @@ class PDFResumen(FPDF):
         self.set_font("Arial", "I", 8)
         self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
-
 def build_pdf_main(df_resultados, df_abiertos):
     """Genera el reporte principal: Detalle de piezas y Mantenimientos Abiertos (Hojas separadas)."""
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
@@ -285,7 +300,7 @@ def build_pdf_main(df_resultados, df_abiertos):
 
     # --- HOJA 2: MANTENIMIENTOS ABIERTOS ---
     if not df_abiertos.empty:
-        pdf.add_page() # Salto estricto a una nueva hoja para los mantenimientos abiertos
+        pdf.add_page()
         pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0)
         pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de Cierre)", ln=True)
         pdf.ln(3)
@@ -361,12 +376,11 @@ def build_pdf_resumen(df_resultados):
     pdf.cell(40, 6, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
     pdf.cell(40, 6, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
     
-    # --- 2. GRÁFICOS DE TORTA (GENERAL + CLIENTES) EN LA MISMA HOJA ---
+    # --- 2. GRÁFICOS DE TORTA ---
     if len(resumen_data) > 0:
         pdf.ln(5)
         y_charts = pdf.get_y()
         
-        # Gráfico 1: Torta General
         fig_gen = go.Figure(data=[go.Pie(
             labels=['CON PREVENTIVO', 'SIN MANT.'], 
             values=[total_ok, total_nok], 
@@ -375,7 +389,6 @@ def build_pdf_resumen(df_resultados):
         fig_gen.update_traces(textposition='inside', textinfo='percent+label', showlegend=False)
         fig_gen.update_layout(title_text="Matrices Totales", title_x=0.5, margin=dict(t=40, b=10, l=10, r=10), height=300, width=300)
 
-        # Gráfico 2: Tortas por Cliente (Subplots)
         fig_cli = make_subplots(
             rows=1, cols=len(resumen_data), 
             specs=[[{'type':'domain'}] * len(resumen_data)], 
@@ -394,17 +407,16 @@ def build_pdf_resumen(df_resultados):
             showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5), 
             margin=dict(t=40, b=40, l=10, r=10), height=300, width=700
         )
-        fig_cli.update_annotations(font_size=12) # Ajusta el texto del nombre del cliente
+        fig_cli.update_annotations(font_size=12) 
         
-        # Inserción de imágenes de manera horizontal
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_gen:
             fig_gen.write_image(tmp_gen.name, engine="kaleido")
-            pdf.image(tmp_gen.name, x=15, y=y_charts, w=70) # Torta General a la izquierda
+            pdf.image(tmp_gen.name, x=15, y=y_charts, w=70) 
             os.remove(tmp_gen.name)
             
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_cli:
             fig_cli.write_image(tmp_cli.name, engine="kaleido")
-            pdf.image(tmp_cli.name, x=90, y=y_charts, w=190) # Tortas Clientes a la derecha
+            pdf.image(tmp_cli.name, x=90, y=y_charts, w=190) 
             os.remove(tmp_cli.name)
     
     buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
@@ -434,18 +446,16 @@ if datos_listos:
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.info("Reporte oficial de control de golpes. Cruza catálogo activo con producción acumulada.")
+        st.info("Reporte oficial de control de golpes. Cruza catálogo activo con producción acumulada (vía SQL Server).")
         
     with col2:
         if st.button("⚙️ Procesar Datos de Matrices", use_container_width=True, type="primary"):
             with st.spinner("Calculando estado de matrices..."):
                 df_res, df_abiertos = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
                 
-                # Guardamos los resultados en el estado de la sesión para mostrarlos y descargarlos
                 st.session_state['df_res'] = df_res
                 st.session_state['df_abiertos'] = df_abiertos
 
-    # Si los datos ya fueron procesados, mostramos botones de descarga
     if 'df_res' in st.session_state and not st.session_state['df_res'].empty:
         df_res = st.session_state['df_res']
         df_abiertos = st.session_state['df_abiertos']
