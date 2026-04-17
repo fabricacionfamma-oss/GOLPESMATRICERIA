@@ -19,7 +19,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">⚙️ Reporte Auxiliar: Control de Golpes de Matrices (FAMMA)</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Producción (SQL Server) y Mantenimiento.</p>", unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Producción (SQL Server - Tabla Diaria) y Mantenimiento.</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
@@ -39,7 +39,6 @@ VALID_PIEZA_COLS = [
 # ==========================================
 def clean_str(val):
     if pd.isna(val): return ""
-    # Blindaje contra saltos de línea que rompen el PDF
     v = str(val).replace('\n', ' ').replace('\r', '').strip().upper()
     if v.endswith('.0'): v = v[:-2]
     return v
@@ -114,17 +113,14 @@ def load_all_data():
     if col_activo:
         df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
     
-    # --- 2. CARGA DE PRODUCCIÓN (SQL Server) ---
-    # Sin límite de año para recuperar el historial completo
+    # --- 2. CARGA DE PRODUCCIÓN (SQL Server - Tabla Diaria) ---
     QUERY_SQL = """
         SELECT 
-            p.Year,
-            p.Month,
-            pr.Code as Codigo_Pieza,
-            COALESCE(p.Good, 0) as Buenas,
-            COALESCE(p.Rework, 0) as Retrabajo
-        FROM PROD_M_01 p
-        LEFT JOIN PRODUCT pr ON p.ProductId = pr.ProductId
+            Date as Fecha_Produccion,
+            Code as Codigo_Pieza,
+            COALESCE(Good, 0) as Buenas,
+            COALESCE(Rework, 0) as Retrabajo
+        FROM PROD_D_01
     """ 
 
     try:
@@ -133,15 +129,13 @@ def load_all_data():
             
         df_prod.columns = df_prod.columns.astype(str).str.strip()
         
-        # Construimos una fecha al día 1 del mes de producción para tener una referencia temporal
-        df_prod['Fecha'] = pd.to_datetime(df_prod['Year'].astype(str) + '-' + df_prod['Month'].astype(str) + '-01', errors='coerce')
+        # Tomamos la fecha exacta del día de producción
+        df_prod['Fecha'] = pd.to_datetime(df_prod['Fecha_Produccion'], errors='coerce')
         
-        # Procesamos los datos numéricos de producción
         df_prod['Buenas_Num'] = pd.to_numeric(df_prod['Buenas'], errors='coerce').fillna(0)
         df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod['Retrabajo'], errors='coerce').fillna(0)
         df_prod['Golpes_Totales'] = df_prod['Buenas_Num'] + df_prod['Retrabajo_Num']
         
-        # Hacemos el match key para cruzar con el catálogo
         df_prod['Pieza_Match'] = df_prod['Codigo_Pieza'].apply(lambda x: get_match_key(clean_str(x))) 
         
     except Exception as e:
@@ -210,11 +204,12 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
         elif pd.notna(fecha_corr): fecha_base = fecha_corr
 
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
-        if pd.notna(fecha_base):
-            # Normalizamos al primer día del mes para cruzar correctamente con los datos mensuales de SQL
-            fecha_base_mes = fecha_base.replace(day=1)
-            prod_match = prod_match[prod_match['Fecha'] >= fecha_base_mes]
         
+        # --- CÁLCULO DE GOLPES EXACTO ---
+        if pd.notna(fecha_base):
+            # Ahora tenemos la fecha diaria real, podemos comparar el día exacto
+            prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
+            
         golpes_totales = int(prod_match['Golpes_Totales'].sum())
         
         color, estado = "VERDE", "OK"
