@@ -337,14 +337,15 @@ def build_pdf_resumen(df_resultados):
     
     resumen_data = []
     total_gen = len(df_resultados)
-    total_ok = len(df_resultados[df_resultados['COLOR'] == 'VERDE'])
-    total_nok = total_gen - total_ok
+    # MODIFICACIÓN: Ahora "Sin Mantenimiento" (NOK) son SOLO las matrices en ROJO
+    total_nok = len(df_resultados[df_resultados['COLOR'] == 'ROJO'])
+    total_ok = total_gen - total_nok
     
     for c in sorted([x for x in df_resultados['CLIENTE'].unique() if x != "-"]):
         df_c = df_resultados[df_resultados['CLIENTE'] == c]
         tot = len(df_c)
-        ok = len(df_c[df_c['COLOR'] == 'VERDE'])
-        nok = tot - ok
+        nok = len(df_c[df_c['COLOR'] == 'ROJO']) # Las Rojas son NOK
+        ok = tot - nok # Verdes y Amarillas son OK
         if tot > 0:
             resumen_data.append({
                 'CLIENTE': c, 'TOT': tot, 'OK': ok, 'NOK': nok, 
