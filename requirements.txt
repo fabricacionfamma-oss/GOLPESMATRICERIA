@@ -1,7 +1,6 @@
 streamlit
 pandas
-plotly
-kaleido
+matplotlib
 fpdf2
 SQLAlchemy
 pymssql
