@@ -78,7 +78,7 @@ def extract_mantenimientos(url, tipo_mant):
                     if val == 'SI' or val == 'SÍ':
                         estado_terminado = 'SI'
                         break
-                
+            
             for i, col_name in enumerate(cols):
                 base_col = col_name.split('.')[0].strip()
                 if base_col in VALID_PIEZA_COLS:
@@ -322,11 +322,17 @@ def build_pdf_main(df_resultados, df_abiertos):
             pdf.cell(35, 7, r['TIPO_MANT_ABIERTO'], 1, 0, 'C')
             pdf.cell(35, 7, r['FECHA_APERTURA'], 1, 1, 'C')
 
-    buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    pdf.output(buf.name)
-    b = open(buf.name, "rb").read()
-    os.remove(buf.name)
-    return b
+    # CORRECCIÓN TEMPORAL FILE FPDF
+    tmp_pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
+    try:
+        pdf.output(tmp_pdf_path)
+        with open(tmp_pdf_path, "rb") as f:
+            b = f.read()
+        return b
+    finally:
+        if os.path.exists(tmp_pdf_path):
+            os.remove(tmp_pdf_path)
+
 
 def build_pdf_resumen(df_resultados):
     """Genera exclusivamente el reporte de Estado General concentrado en UNA SOLA HOJA."""
@@ -414,21 +420,33 @@ def build_pdf_resumen(df_resultados):
         )
         fig_cli.update_annotations(font_size=12) 
         
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_gen:
-            fig_gen.write_image(tmp_gen.name, engine="kaleido")
-            pdf.image(tmp_gen.name, x=15, y=y_charts, w=70) 
-            os.remove(tmp_gen.name)
-            
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_cli:
-            fig_cli.write_image(tmp_cli.name, engine="kaleido")
-            pdf.image(tmp_cli.name, x=90, y=y_charts, w=190) 
-            os.remove(tmp_cli.name)
-    
-    buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    pdf.output(buf.name)
-    b = open(buf.name, "rb").read()
-    os.remove(buf.name)
-    return b
+        # CORRECCIÓN TEMPORAL FILES PLOTLY/KALEIDO
+        tmp_gen_path = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
+        try:
+            fig_gen.write_image(tmp_gen_path, engine="kaleido")
+            pdf.image(tmp_gen_path, x=15, y=y_charts, w=70) 
+        finally:
+            if os.path.exists(tmp_gen_path):
+                os.remove(tmp_gen_path)
+                
+        tmp_cli_path = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
+        try:
+            fig_cli.write_image(tmp_cli_path, engine="kaleido")
+            pdf.image(tmp_cli_path, x=90, y=y_charts, w=190) 
+        finally:
+            if os.path.exists(tmp_cli_path):
+                os.remove(tmp_cli_path)
+
+    # CORRECCIÓN TEMPORAL FILE FPDF
+    tmp_pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
+    try:
+        pdf.output(tmp_pdf_path)
+        with open(tmp_pdf_path, "rb") as f:
+            b = f.read()
+        return b
+    finally:
+        if os.path.exists(tmp_pdf_path):
+            os.remove(tmp_pdf_path)
 
 # ==========================================
 # 6. INTERFAZ DE STREAMLIT
