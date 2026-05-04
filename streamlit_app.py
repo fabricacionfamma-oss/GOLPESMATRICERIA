@@ -3,6 +3,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 import tempfile
 import os
+import io
+import matplotlib.subplots
 import matplotlib.pyplot as plt
 from fpdf import FPDF
 
@@ -215,7 +217,7 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
     return pd.DataFrame(resultados), pd.DataFrame(abiertos)
 
 # ==========================================
-# 5. GENERACIÓN DEL PDF (FPDF)
+# 5. GENERACIÓN DEL PDF Y EXCEL
 # ==========================================
 class PDFGolpes(FPDF):
     def header(self):
@@ -316,6 +318,15 @@ def build_pdf_main(df_resultados, df_abiertos):
     finally:
         if os.path.exists(tmp_pdf_path):
             os.remove(tmp_pdf_path)
+
+def build_excel_main(df_resultados, df_abiertos):
+    """Genera el reporte principal en formato Excel (.xlsx)."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_resultados.to_excel(writer, index=False, sheet_name='Estado de Matrices')
+        if not df_abiertos.empty:
+            df_abiertos.to_excel(writer, index=False, sheet_name='Abiertos')
+    return output.getvalue()
 
 def build_pdf_resumen(df_resultados):
     """Genera exclusivamente el reporte de Estado General concentrado en UNA SOLA HOJA."""
@@ -464,7 +475,7 @@ if datos_listos:
         st.write("---")
         st.write(f"**Resumen de la corrida:** 🔴 {rojos} Críticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
         
-        col_desc1, col_desc2 = st.columns(2)
+        col_desc1, col_desc2, col_desc3 = st.columns(3)
         
         h = datetime.utcnow() - timedelta(hours=3)
         fecha_str = h.strftime('%d%m%Y')
@@ -472,7 +483,7 @@ if datos_listos:
         with col_desc1:
             pdf_main_data = build_pdf_main(df_res, df_abiertos)
             st.download_button(
-                label="📥 Descargar Reporte Principal (Detalles y Pendientes)", 
+                label="📥 PDF: Reporte Principal (Detalle)", 
                 data=pdf_main_data, 
                 file_name=f"Reporte_Golpes_Detalle_{fecha_str}.pdf", 
                 mime="application/pdf", 
@@ -480,9 +491,19 @@ if datos_listos:
             )
             
         with col_desc2:
+            excel_main_data = build_excel_main(df_res, df_abiertos)
+            st.download_button(
+                label="📥 EXCEL: Reporte Principal (Detalle)", 
+                data=excel_main_data, 
+                file_name=f"Reporte_Golpes_Detalle_{fecha_str}.xlsx", 
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                use_container_width=True
+            )
+
+        with col_desc3:
             pdf_resumen_data = build_pdf_resumen(df_res)
             st.download_button(
-                label="📊 Descargar Resumen General (Tabla y Gráficos)", 
+                label="📊 PDF: Resumen General (Tabla/Gráficos)", 
                 data=pdf_resumen_data, 
                 file_name=f"Reporte_Golpes_Resumen_{fecha_str}.pdf", 
                 mime="application/pdf", 
