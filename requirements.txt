@@ -4,3 +4,4 @@ matplotlib
 fpdf2
 SQLAlchemy
 pymssql
+xlsxwriter
