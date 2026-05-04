@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 import tempfile
 import os
 import io
-import matplotlib.subplots
 import matplotlib.pyplot as plt
 from fpdf import FPDF
 
