@@ -112,11 +112,13 @@ def load_all_data():
     if col_activo:
         df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
     
-    # NOTA: Si en tu tabla PROD_D_01 tienes la columna de operación, agrégala aquí (ej: Operation as OP_Prod)
+    # NOTA: Asegúrate de que "Factory" es el nombre correcto de tu columna de Fábrica en SQL Server. 
+    # Si se llama distinto (ej. Area, Fabrica, Planta), cámbialo en la siguiente consulta.
     QUERY_SQL = """
         SELECT 
             Date as Fecha_Produccion,
             Code as Codigo_Pieza,
+            Factory as Fabrica, 
             COALESCE(Good, 0) as Buenas,
             COALESCE(Rework, 0) as Retrabajo
         FROM PROD_D_01
@@ -125,10 +127,17 @@ def load_all_data():
         conn = st.connection("wii_bi", type="sql")
         df_prod = conn.query(QUERY_SQL)
         df_prod.columns = df_prod.columns.astype(str).str.strip()
+        
+        # --- FILTRO CLAVE: Dejamos ÚNICAMENTE la producción de Estampado ---
+        df_prod = df_prod[df_prod['Fabrica'].astype(str).str.upper().str.contains('ESTAMPADO', na=False)]
+        
         df_prod['Fecha'] = pd.to_datetime(df_prod['Fecha_Produccion'], errors='coerce')
         df_prod['Buenas_Num'] = pd.to_numeric(df_prod['Buenas'], errors='coerce').fillna(0)
         df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod['Retrabajo'], errors='coerce').fillna(0)
         df_prod['Golpes_Totales'] = df_prod['Buenas_Num'] + df_prod['Retrabajo_Num']
+        
+        # Al aplicar esto, la pieza RE765173855R/007 (que es de Estampado) se limpiará a RE765173855R.
+        # Como ya filtramos fuera todo lo de "Soldadura", no habrá conteos duplicados.
         df_prod['Pieza_Match'] = df_prod['Codigo_Pieza'].apply(lambda x: get_match_key(clean_str(x))) 
     except Exception as e:
         st.error(f"❌ Error al conectar o extraer datos de SQL Server: {e}")
@@ -195,11 +204,6 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
 
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         
-        # NOTA: Si extrajiste OP de SQL Server, descomenta la siguiente línea para mayor precisión:
-        # if 'OP_Prod' in df_prod.columns:
-        #     prod_match = prod_match[prod_match['OP_Prod'] == op]
-        
-        # CORRECCIÓN CLAVE: Usar '>' en lugar de '>=' para no sumar los golpes del mismo día del mantenimiento
         if pd.notna(fecha_base):
             prod_match = prod_match[prod_match['Fecha'] > fecha_base]
             
@@ -257,7 +261,6 @@ class PDFResumen(FPDF):
         self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
 def build_pdf_main(df_resultados, df_abiertos):
-    """Genera el reporte principal: Detalle de piezas y Mantenimientos Abiertos."""
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
     
     # --- HOJA 1: DETALLE DE GOLPES ---
@@ -325,7 +328,6 @@ def build_pdf_main(df_resultados, df_abiertos):
             os.remove(tmp_pdf_path)
 
 def build_excel_main(df_resultados, df_abiertos):
-    """Genera el reporte principal en formato Excel (.xlsx)."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df_resultados.to_excel(writer, index=False, sheet_name='Estado de Matrices')
@@ -334,7 +336,6 @@ def build_excel_main(df_resultados, df_abiertos):
     return output.getvalue()
 
 def build_pdf_resumen(df_resultados):
-    """Genera exclusivamente el reporte de Estado General concentrado en UNA SOLA HOJA."""
     pdf = PDFResumen(orientation='L', unit='mm', format='A4')
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
@@ -357,7 +358,7 @@ def build_pdf_resumen(df_resultados):
                 'PNOK': f"{int(round(nok/tot*100))}%"
             })
 
-    # --- 1. TABLA RESUMEN CON FORMATO MÁS COMPACTO ---
+    # --- 1. TABLA RESUMEN ---
     pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     mx = 43.5; pdf.set_x(mx)
     pdf.cell(35, 6, "CLIENTE", 1, 0, 'C', fill=True)
@@ -385,12 +386,11 @@ def build_pdf_resumen(df_resultados):
     pdf.cell(40, 6, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
     pdf.cell(40, 6, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
     
-    # --- 2. GRÁFICOS DE TORTA (Con Matplotlib) ---
+    # --- 2. GRÁFICOS DE TORTA ---
     if len(resumen_data) > 0:
         pdf.ln(5)
         y_charts = pdf.get_y()
         
-        # 2.1 Gráfico General
         fig_gen, ax_gen = plt.subplots(figsize=(3, 3))
         ax_gen.pie([total_ok, total_nok], labels=['CON PREVENTIVO', 'SIN MANT.'], 
                    colors=['#2ca02c', '#d62728'], autopct='%1.1f%%', textprops={'fontsize': 8})
@@ -405,11 +405,9 @@ def build_pdf_resumen(df_resultados):
             if os.path.exists(tmp_gen_path):
                 os.remove(tmp_gen_path)
 
-        # 2.2 Gráficos por Cliente
         num_clientes = len(resumen_data)
         fig_cli, axs = plt.subplots(1, num_clientes, figsize=(2.5 * num_clientes, 3))
         
-        # Ajustar axs si hay un solo cliente para poder iterar
         if num_clientes == 1:
             axs = [axs]
             
