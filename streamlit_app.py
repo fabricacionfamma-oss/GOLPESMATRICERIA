@@ -112,6 +112,7 @@ def load_all_data():
     if col_activo:
         df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
     
+    # NOTA: Si en tu tabla PROD_D_01 tienes la columna de operación, agrégala aquí (ej: Operation as OP_Prod)
     QUERY_SQL = """
         SELECT 
             Date as Fecha_Produccion,
@@ -194,8 +195,13 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
 
         prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         
+        # NOTA: Si extrajiste OP de SQL Server, descomenta la siguiente línea para mayor precisión:
+        # if 'OP_Prod' in df_prod.columns:
+        #     prod_match = prod_match[prod_match['OP_Prod'] == op]
+        
+        # CORRECCIÓN CLAVE: Usar '>' en lugar de '>=' para no sumar los golpes del mismo día del mantenimiento
         if pd.notna(fecha_base):
-            prod_match = prod_match[prod_match['Fecha'] >= fecha_base]
+            prod_match = prod_match[prod_match['Fecha'] > fecha_base]
             
         golpes_totales = int(prod_match['Golpes_Totales'].sum())
         
