@@ -112,8 +112,7 @@ def load_all_data():
     if col_activo:
         df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
     
-    # NOTA: Asegúrate de que "Factory" es el nombre correcto de tu columna de Fábrica en SQL Server. 
-    # Si se llama distinto (ej. Area, Fabrica, Planta), cámbialo en la siguiente consulta.
+    # Consulta a SQL Server trayendo la columna Factory
     QUERY_SQL = """
         SELECT 
             Date as Fecha_Produccion,
@@ -129,15 +128,16 @@ def load_all_data():
         df_prod.columns = df_prod.columns.astype(str).str.strip()
         
         # --- FILTRO CLAVE: Dejamos ÚNICAMENTE la producción de Estampado ---
-        df_prod = df_prod[df_prod['Fabrica'].astype(str).str.upper().str.contains('ESTAMPADO', na=False)]
+        # Filtramos por 'EST' para agarrar 'Est', 'Estampado', 'ESTAMPADO', etc.
+        # Esto automáticamente mata todas las filas de Soldadura ('Sol') y sus sub-códigos.
+        df_prod = df_prod[df_prod['Fabrica'].astype(str).str.upper().str.contains('EST', na=False)]
         
         df_prod['Fecha'] = pd.to_datetime(df_prod['Fecha_Produccion'], errors='coerce')
         df_prod['Buenas_Num'] = pd.to_numeric(df_prod['Buenas'], errors='coerce').fillna(0)
         df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod['Retrabajo'], errors='coerce').fillna(0)
         df_prod['Golpes_Totales'] = df_prod['Buenas_Num'] + df_prod['Retrabajo_Num']
         
-        # Al aplicar esto, la pieza RE765173855R/007 (que es de Estampado) se limpiará a RE765173855R.
-        # Como ya filtramos fuera todo lo de "Soldadura", no habrá conteos duplicados.
+        # Aplicamos la limpieza. Como solo queda Estampado, limpiará los sufijos correctamente sin sumar Soldadura.
         df_prod['Pieza_Match'] = df_prod['Codigo_Pieza'].apply(lambda x: get_match_key(clean_str(x))) 
     except Exception as e:
         st.error(f"❌ Error al conectar o extraer datos de SQL Server: {e}")
