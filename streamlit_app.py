@@ -112,7 +112,6 @@ def load_all_data():
     if col_activo:
         df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
     
-    # Consulta a SQL Server trayendo la columna Factory
     QUERY_SQL = """
         SELECT 
             Date as Fecha_Produccion,
@@ -127,7 +126,6 @@ def load_all_data():
         df_prod = conn.query(QUERY_SQL)
         df_prod.columns = df_prod.columns.astype(str).str.strip()
         
-        # --- FILTRO CLAVE: Dejamos ÚNICAMENTE la producción de Estampado ---
         df_prod = df_prod[df_prod['Fabrica'].astype(str).str.upper().str.contains('EST', na=False)]
         
         df_prod['Fecha'] = pd.to_datetime(df_prod['Fecha_Produccion'], errors='coerce')
@@ -271,7 +269,9 @@ class PDFHistorial(FPDF):
     def footer(self):
         self.set_y(-15)
         self.set_font("Arial", "I", 8)
-        self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
+        self.set_text_color(120, 120, 120)
+        # ---> LEYENDA AGREGADA SÓLO EN EL PIE DE PÁGINA DEL HISTORIAL <---
+        self.cell(0, 10, "(*) Golpes al momento: Producción acumulada desde la fecha del mantenimiento anterior  |  " + f"Pagina {self.page_no()}", 0, 0, "C")
 
 def build_pdf_main(df_resultados, df_abiertos):
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
@@ -459,8 +459,13 @@ def build_pdf_historial(matriz_nombre, df_hist):
     pdf.set_text_color(0, 0, 0)
     
     matriz_str = matriz_nombre.encode('latin-1', 'replace').decode('latin-1')
-    pdf.cell(0, 10, f"Matriz / Operacion: {matriz_str}", ln=True, align='L')
-    pdf.ln(2)
+    pdf.cell(0, 6, f"Matriz / Operacion: {matriz_str}", ln=True, align='L')
+    
+    # ---> LEYENDA AGREGADA DEBAJO DEL TÍTULO SÓLO EN EL HISTORIAL <---
+    pdf.set_font("Arial", 'I', 8.5)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 5, "(*) LEYENDA: Los golpes mostrados corresponden a la producción acumulada estrictamente entre cada fecha de mantenimiento.", ln=True, align='L')
+    pdf.ln(3)
 
     # Encabezado de la tabla
     pdf.set_font("Arial", 'B', 9)
