@@ -128,8 +128,6 @@ def load_all_data():
         df_prod.columns = df_prod.columns.astype(str).str.strip()
         
         # --- FILTRO CLAVE: Dejamos ÚNICAMENTE la producción de Estampado ---
-        # Filtramos por 'EST' para agarrar 'Est', 'Estampado', 'ESTAMPADO', etc.
-        # Esto automáticamente mata todas las filas de Soldadura ('Sol') y sus sub-códigos.
         df_prod = df_prod[df_prod['Fabrica'].astype(str).str.upper().str.contains('EST', na=False)]
         
         df_prod['Fecha'] = pd.to_datetime(df_prod['Fecha_Produccion'], errors='coerce')
@@ -137,7 +135,6 @@ def load_all_data():
         df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod['Retrabajo'], errors='coerce').fillna(0)
         df_prod['Golpes_Totales'] = df_prod['Buenas_Num'] + df_prod['Retrabajo_Num']
         
-        # Aplicamos la limpieza. Como solo queda Estampado, limpiará los sufijos correctamente sin sumar Soldadura.
         df_prod['Pieza_Match'] = df_prod['Codigo_Pieza'].apply(lambda x: get_match_key(clean_str(x))) 
     except Exception as e:
         st.error(f"❌ Error al conectar o extraer datos de SQL Server: {e}")
@@ -255,6 +252,22 @@ class PDFResumen(FPDF):
         self.cell(0, 5, f"Generado el: {hora_arg.strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C')
         self.ln(3)
         
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("Arial", "I", 8)
+        self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
+
+class PDFHistorial(FPDF):
+    def header(self):
+        self.set_font("Arial", 'B', 15)
+        self.set_text_color(31, 73, 125)
+        self.cell(0, 10, "Historial Especifico de Mantenimientos", border=0, ln=True, align='C')
+        self.set_font("Arial", 'I', 9)
+        self.set_text_color(100, 100, 100)
+        hora_arg = datetime.utcnow() - timedelta(hours=3)
+        self.cell(0, 5, f"Generado el: {hora_arg.strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C')
+        self.ln(5)
+
     def footer(self):
         self.set_y(-15)
         self.set_font("Arial", "I", 8)
@@ -436,6 +449,55 @@ def build_pdf_resumen(df_resultados):
         if os.path.exists(tmp_pdf_path):
             os.remove(tmp_pdf_path)
 
+def build_pdf_historial(matriz_nombre, df_hist):
+    pdf = PDFHistorial(orientation='P', unit='mm', format='A4')
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # Info de la matriz
+    pdf.set_font("Arial", 'B', 10)
+    pdf.set_text_color(0, 0, 0)
+    
+    matriz_str = matriz_nombre.encode('latin-1', 'replace').decode('latin-1')
+    pdf.cell(0, 10, f"Matriz / Operacion: {matriz_str}", ln=True, align='L')
+    pdf.ln(2)
+
+    # Encabezado de la tabla
+    pdf.set_font("Arial", 'B', 9)
+    pdf.set_fill_color(31, 73, 125)
+    pdf.set_text_color(255, 255, 255)
+    
+    w_fecha = 40
+    w_tipo = 65
+    w_golpes = 65
+    offset = (210 - (w_fecha + w_tipo + w_golpes)) / 2 
+    
+    pdf.set_x(offset)
+    pdf.cell(w_fecha, 8, "Fecha", 1, 0, 'C', fill=True)
+    pdf.cell(w_tipo, 8, "Tipo de Mantenimiento", 1, 0, 'C', fill=True)
+    pdf.cell(w_golpes, 8, "Golpes (Desde ant.)", 1, 1, 'C', fill=True)
+
+    # Cuerpo de la tabla
+    pdf.set_font("Arial", '', 9)
+    pdf.set_text_color(0, 0, 0)
+    for _, row in df_hist.iterrows():
+        pdf.set_x(offset)
+        pdf.cell(w_fecha, 7, str(row['Fecha de Mantenimiento']), 1, 0, 'C')
+        
+        tipo_str = str(row['Tipo de Mantenimiento']).replace('🔧 ', '').replace('🛠️ ', '')
+        pdf.cell(w_tipo, 7, tipo_str, 1, 0, 'C')
+        
+        pdf.cell(w_golpes, 7, str(row['Golpes al momento (Desde mant. anterior)']), 1, 1, 'C')
+
+    tmp_pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
+    try:
+        pdf.output(tmp_pdf_path)
+        with open(tmp_pdf_path, "rb") as f:
+            return f.read()
+    finally:
+        if os.path.exists(tmp_pdf_path):
+            os.remove(tmp_pdf_path)
+
 # ==========================================
 # 6. INTERFAZ DE STREAMLIT
 # ==========================================
@@ -514,3 +576,109 @@ if datos_listos:
             )
     elif 'df_res' in st.session_state and st.session_state['df_res'].empty:
         st.warning("No hay datos activos en el catálogo.")
+
+# ==========================================
+# 7. HISTORIAL ESPECÍFICO DE MATRIZ
+# ==========================================
+if datos_listos and not df_cat_raw.empty:
+    st.write("---")
+    st.markdown('<div class="header-style">🔍 Historial Específico por Matriz</div>', unsafe_allow_html=True)
+
+    col_pieza_hist = next((c for c in df_cat_raw.columns if c.upper() == 'PIEZA'), 'PIEZA')
+    col_op_hist = next((c for c in df_cat_raw.columns if c.upper() == 'OP'), 'OP')
+    col_cliente_hist = next((c for c in df_cat_raw.columns if 'CLIENTE' in c.upper()), 'CLIENTE')
+
+    df_cat_raw['OPCION_SELECT'] = df_cat_raw[col_cliente_hist].fillna('-').astype(str) + " | " + df_cat_raw[col_pieza_hist].fillna('-').astype(str) + " | OP: " + df_cat_raw[col_op_hist].fillna('-').astype(str)
+    opciones_matriz = sorted(df_cat_raw['OPCION_SELECT'].dropna().unique().tolist())
+    
+    matriz_seleccionada = st.selectbox(
+        "Seleccione una Matriz para revisar su historial de mantenimientos:", 
+        ["--- Seleccione una opcion ---"] + opciones_matriz
+    )
+
+    if matriz_seleccionada != "--- Seleccione una opcion ---":
+        cat_info = df_cat_raw[df_cat_raw['OPCION_SELECT'] == matriz_seleccionada].iloc[0]
+        pieza_str = clean_str(cat_info.get(col_pieza_hist, ''))
+        op_str = clean_str(cat_info.get(col_op_hist, ''))
+        pieza_match_key = get_match_key(pieza_str)
+
+        if not df_mant_raw.empty:
+            df_hist_mant = df_mant_raw[(df_mant_raw['Pieza_Match'] == pieza_match_key) & (df_mant_raw['OP'] == op_str) & (df_mant_raw['Terminado'] == 'SI')].copy()
+        else:
+            df_hist_mant = pd.DataFrame()
+
+        if df_hist_mant.empty:
+            st.info("ℹ️ No hay registros de mantenimientos finalizados para esta matriz en los formularios.")
+        else:
+            df_hist_mant = df_hist_mant.sort_values('Fecha')
+            historial_data = []
+            
+            es_primer_registro = True
+            fecha_anterior = pd.to_datetime("2025-01-01") 
+
+            for _, row in df_hist_mant.iterrows():
+                fecha_mant = row['Fecha']
+                tipo_mant = row['Tipo_Mant']
+
+                if es_primer_registro:
+                    golpes_acumulados = 0
+                    texto_golpes = "0 (Registro Inicial)"
+                    es_primer_registro = False
+                else:
+                    if not df_prod_raw.empty:
+                        df_golpes = df_prod_raw[(df_prod_raw['Pieza_Match'] == pieza_match_key) & 
+                                                (df_prod_raw['Fecha'] > fecha_anterior) & 
+                                                (df_prod_raw['Fecha'] <= fecha_mant)]
+                        golpes_acumulados = df_golpes['Golpes_Totales'].sum()
+                    else:
+                        golpes_acumulados = 0
+                    texto_golpes = f"{int(golpes_acumulados):,}".replace(',', '.')
+
+                historial_data.append({
+                    "Exportar": True,
+                    "Fecha de Mantenimiento": fecha_mant.strftime('%d/%m/%Y'),
+                    "Tipo de Mantenimiento": "🔧 Preventivo" if tipo_mant == "PREV" else "🛠️ Correctivo",
+                    "Golpes al momento (Desde mant. anterior)": texto_golpes
+                })
+
+                fecha_anterior = fecha_mant
+
+            df_hist_mostrar = pd.DataFrame(historial_data)
+            
+            st.write("📝 **Selecciona qué registros quieres incluir en el PDF a exportar:**")
+            
+            df_editado = st.data_editor(
+                df_hist_mostrar,
+                column_config={
+                    "Exportar": st.column_config.CheckboxColumn(
+                        "Exportar al PDF",
+                        help="Marca o desmarca para incluir esta fila en el documento PDF",
+                        default=True,
+                    )
+                },
+                disabled=["Fecha de Mantenimiento", "Tipo de Mantenimiento", "Golpes al momento (Desde mant. anterior)"],
+                hide_index=True,
+                use_container_width=True
+            )
+
+            df_a_exportar = df_editado[df_editado["Exportar"] == True].copy()
+            
+            if not df_a_exportar.empty:
+                pdf_hist_data = build_pdf_historial(matriz_seleccionada, df_a_exportar)
+                
+                nombre_seguro = "".join(c for c in pieza_match_key if c.isalnum() or c in ('-', '_')).strip()
+                fecha_str = (datetime.utcnow() - timedelta(hours=3)).strftime('%d%m%Y')
+                
+                st.download_button(
+                    label="📥 Exportar Historial Seleccionado a PDF",
+                    data=pdf_hist_data,
+                    file_name=f"Historial_{nombre_seguro}_{fecha_str}.pdf",
+                    mime="application/pdf",
+                    type="primary"
+                )
+            else:
+                st.warning("⚠️ Debes seleccionar al menos una fila para poder exportar el PDF.")
+                
+            if not df_prod_raw.empty:
+                golpes_actuales = df_prod_raw[(df_prod_raw['Pieza_Match'] == pieza_match_key) & (df_prod_raw['Fecha'] > fecha_anterior)]['Golpes_Totales'].sum()
+                st.caption(f"**Golpes acumulados actualmente (desde el {fecha_anterior.strftime('%d/%m/%Y')}):** {int(golpes_actuales):,} golpes.")
