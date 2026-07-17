@@ -269,9 +269,7 @@ class PDFHistorial(FPDF):
     def footer(self):
         self.set_y(-15)
         self.set_font("Arial", "I", 8)
-        self.set_text_color(120, 120, 120)
-        # ---> LEYENDA AGREGADA SÓLO EN EL PIE DE PÁGINA DEL HISTORIAL <---
-        self.cell(0, 10, "(*) Golpes al momento: Producción acumulada desde la fecha del mantenimiento anterior  |  " + f"Pagina {self.page_no()}", 0, 0, "C")
+        self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
 def build_pdf_main(df_resultados, df_abiertos):
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
@@ -449,7 +447,7 @@ def build_pdf_resumen(df_resultados):
         if os.path.exists(tmp_pdf_path):
             os.remove(tmp_pdf_path)
 
-def build_pdf_historial(matriz_nombre, df_hist):
+def build_pdf_historial(matriz_nombre, df_hist, leyenda_actual=""):
     pdf = PDFHistorial(orientation='P', unit='mm', format='A4')
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -460,11 +458,6 @@ def build_pdf_historial(matriz_nombre, df_hist):
     
     matriz_str = matriz_nombre.encode('latin-1', 'replace').decode('latin-1')
     pdf.cell(0, 6, f"Matriz / Operacion: {matriz_str}", ln=True, align='L')
-    
-    # ---> LEYENDA AGREGADA DEBAJO DEL TÍTULO SÓLO EN EL HISTORIAL <---
-    pdf.set_font("Arial", 'I', 8.5)
-    pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 5, "(*) LEYENDA: Los golpes mostrados corresponden a la producción acumulada estrictamente entre cada fecha de mantenimiento.", ln=True, align='L')
     pdf.ln(3)
 
     # Encabezado de la tabla
@@ -493,6 +486,16 @@ def build_pdf_historial(matriz_nombre, df_hist):
         pdf.cell(w_tipo, 7, tipo_str, 1, 0, 'C')
         
         pdf.cell(w_golpes, 7, str(row['Golpes al momento (Desde mant. anterior)']), 1, 1, 'C')
+
+    # ---> INYECCIÓN DE LA LEYENDA ACTUAL AL FINAL DE LA TABLA EN EL PDF <---
+    if leyenda_actual:
+        pdf.ln(5)
+        pdf.set_x(offset)
+        pdf.set_font("Arial", 'B', 9.5)
+        pdf.set_fill_color(255, 243, 180) # Fondo amarillo suave para resaltar igual que en la web
+        pdf.set_text_color(0, 0, 0)
+        leyenda_clean = leyenda_actual.encode('latin-1', 'replace').decode('latin-1')
+        pdf.cell(w_fecha + w_tipo + w_golpes, 8, f"  {leyenda_clean}  ", border=1, ln=True, align='C', fill=True)
 
     tmp_pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
     try:
@@ -668,8 +671,17 @@ if datos_listos and not df_cat_raw.empty:
 
             df_a_exportar = df_editado[df_editado["Exportar"] == True].copy()
             
+            # ---> CÁLCULO PREVIO DE GOLPES ACTUALES PARA QUE SALGA EN EL PDF <---
+            golpes_actuales = 0
+            if not df_prod_raw.empty:
+                golpes_actuales = df_prod_raw[(df_prod_raw['Pieza_Match'] == pieza_match_key) & (df_prod_raw['Fecha'] > fecha_anterior)]['Golpes_Totales'].sum()
+            
+            golpes_str = f"{int(golpes_actuales):,}".replace(',', '.')
+            leyenda_actual = f"Golpes acumulados actualmente (desde el {fecha_anterior.strftime('%d/%m/%Y')}): {golpes_str} golpes."
+            
             if not df_a_exportar.empty:
-                pdf_hist_data = build_pdf_historial(matriz_seleccionada, df_a_exportar)
+                # Pasamos la cadena con los golpes actuales a la función creadora del PDF
+                pdf_hist_data = build_pdf_historial(matriz_seleccionada, df_a_exportar, leyenda_actual)
                 
                 nombre_seguro = "".join(c for c in pieza_match_key if c.isalnum() or c in ('-', '_')).strip()
                 fecha_str = (datetime.utcnow() - timedelta(hours=3)).strftime('%d%m%Y')
@@ -684,6 +696,4 @@ if datos_listos and not df_cat_raw.empty:
             else:
                 st.warning("⚠️ Debes seleccionar al menos una fila para poder exportar el PDF.")
                 
-            if not df_prod_raw.empty:
-                golpes_actuales = df_prod_raw[(df_prod_raw['Pieza_Match'] == pieza_match_key) & (df_prod_raw['Fecha'] > fecha_anterior)]['Golpes_Totales'].sum()
-                st.caption(f"**Golpes acumulados actualmente (desde el {fecha_anterior.strftime('%d/%m/%Y')}):** {int(golpes_actuales):,} golpes.")
+            st.caption(f"**{leyenda_actual}**")
