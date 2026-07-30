@@ -218,7 +218,22 @@ def procesar_estado_matrices(df_cat, df_prod, df_mant):
             abiertos.append({'CLIENTE': clean_str(row.get(col_cliente, '-')), 'PIEZA': pieza_completa, 'OP': op,
                              'TIPO': clean_str(row.get(col_tipo, '-')), 'TIPO_MANT_ABIERTO': tipo_abierto, 'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')})
             
-    return pd.DataFrame(resultados), pd.DataFrame(abiertos)
+    # ---> INICIO DEL CÓDIGO NUEVO PARA ORDENAR <---
+    df_resultados = pd.DataFrame(resultados)
+    
+    if not df_resultados.empty:
+        # Asignamos un número de prioridad: ROJO = 1, AMARILLO = 2, VERDE = 3
+        orden_colores = {"ROJO": 1, "AMARILLO": 2, "VERDE": 3}
+        df_resultados['Prioridad_Color'] = df_resultados['COLOR'].map(orden_colores)
+        
+        # Ordenamos primero por prioridad de color (ascendente) y luego por golpes (descendente)
+        df_resultados = df_resultados.sort_values(
+            by=['Prioridad_Color', 'GOLPES'], 
+            ascending=[True, False]
+        ).drop(columns=['Prioridad_Color'])
+    # ---> FIN DEL CÓDIGO NUEVO PARA ORDENAR <---
+
+    return df_resultados, pd.DataFrame(abiertos)
 
 # ==========================================
 # 5. GENERACIÓN DEL PDF Y EXCEL
