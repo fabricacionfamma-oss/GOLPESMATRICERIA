@@ -1,29 +1,16 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import tempfile
 import os
 import io
-import difflib
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import matplotlib.pyplot as plt
 from fpdf import FPDF
-
-# ==========================================
-# 0. MAPEO DE MÁQUINAS (EXCLUSIVO ESTAMPADO)
-# ==========================================
-MAQUINAS_ESTAMPADO = [
-    "P-023", "P-024", "P-025", "P-026", "P-027", "P-028", "P-029", "P-030",
-    "BAL-002", "BAL-003", "BAL-005", "BAL-006", "BAL-007", "BAL-008", "BAL-009", 
-    "BAL-010", "BAL-011", "BAL-012", "BAL-013", "BAL-014", "BAL-015",
-    "P-011", "P-012", "P-013", "P-014", "P-016", "P-017", "P-018", 
-    "P-015", "P-019", "P-020", "P-021", "P-022", "GOF01"
-]
 
 # ==========================================
 # 1. CONFIGURACIÓN Y ESTILOS
 # ==========================================
-st.set_page_config(page_title="Control de Golpes - Fumiscor", layout="wide", page_icon="⚙️")
+st.set_page_config(page_title="Control de Golpes de Matrices", layout="wide", page_icon="⚙️")
 
 st.markdown("""
 <style>
@@ -31,343 +18,257 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="header-style">⚙️ Sistema de Diagnóstico y Control - Fumiscor</div>', unsafe_allow_html=True)
+st.markdown('<div class="header-style">⚙️ Reporte Auxiliar: Control de Golpes de Matrices (FAMMA)</div>', unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Cruce automático de Catálogo, Producción (SQL Server - Tabla Diaria) y Mantenimiento.</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
-# 2. ENLACES DE DATOS (FUMISCOR)
+# 2. ENLACES DE GOOGLE SHEETS
 # ==========================================
-URL_CATALOGO = "https://docs.google.com/spreadsheets/d/198KjQWZwfvvWwq1q1N1zv1cgzkot2hhGbwQvbi9_zFQ/export?format=csv&gid=1766766947"
-URL_FORMS_PREV = "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv&gid=1603203990"
-URL_FORMS_CORR = "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893"
+URL_CATALOGO = "https://docs.google.com/spreadsheets/d/1feaeFLl2UslCsO4mzldUVFuhY1bdnUiQPatRM2m0sW0/export?format=csv&gid=1862158700"
+URL_PREV_FAMMA = "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888"
+URL_CORR_FAMMA = "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679"
+
+VALID_PIEZA_COLS = [
+    'PIEZAS RENAULT', 'PIEZAS FAURECIA', 'PIEZAS FIAT', 'PIEZAS DENSO', 
+    'PIEZAS PEUGEOT', 'PIEZA FIAT', 'PIEZA NISSAN', 'PIEZA RENAULT', 'NUMERO DE PIEZA'
+]
 
 # ==========================================
-# 3. FUNCIONES DE LIMPIEZA Y MATCHING AVANZADO
+# 3. FUNCIONES DE LIMPIEZA Y CARGA
 # ==========================================
 def clean_str(val):
     if pd.isna(val): return ""
-    return str(val).strip().upper().replace(" ", "")
+    v = str(val).replace('\n', ' ').replace('\r', '').strip().upper()
+    if v.endswith('.0'): v = v[:-2]
+    return v
 
-def parsear_fecha_segura(val):
-    if pd.isna(val) or not str(val).strip():
-        return pd.NaT
-    s = str(val).strip()
-    for fmt in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            return pd.to_datetime(s, format=fmt).normalize()
-        except ValueError:
-            continue
-    f = pd.to_datetime(s, dayfirst=True, errors='coerce')
-    return f.normalize() if pd.notna(f) else pd.NaT
+def get_match_key(pieza_str):
+    pieza_str = str(pieza_str).strip()
+    p = pieza_str.split('/')[0].strip()
+    if ' - ' in p:
+        p = p.split(' - ')[0].strip()
+    elif '-' in p:
+        p = p.split('-')[0].strip()
+    return p
 
-def find_op_col_for_pieza(pieza_col_name, df_cols):
-    mapping = {
-        'PIEZAS RENAULT': 'OPERACION',
-        'PIEZAS FAURECIA': 'OPERACION 2',
-        'PIEZAS FIAT': 'OPERACION 3',
-        'PIEZAS DENSO': 'OPERACION 4',
-        'PIEZAS PEUGEOT': 'OPERACION 5',
-        'NUMERO DE PIEZA': 'OPERACION 6',
-        'MATRIZ': 'OPERACION'
-    }
-    target = next((v for k, v in mapping.items() if k in pieza_col_name.upper()), None)
-    if target:
-        for c in df_cols:
-            if clean_str(c) == clean_str(target): return c
-            if clean_str(c).replace('Ó','O') == clean_str(target): return c
-    return None
-
-def get_best_match_hybrid(pieza_raw, operacion_raw, cat_matrices):
-    p_clean = clean_str(pieza_raw)
-    op_clean = clean_str(operacion_raw)
-    
-    if not p_clean: return ""
-    
-    for m in cat_matrices:
-        if clean_str(m) == p_clean: return m
-            
-    candidates = [m for m in cat_matrices if (p_clean in clean_str(m) or clean_str(m) in p_clean) and len(p_clean)>6]
-    
-    if not candidates:
-        matches = difflib.get_close_matches(p_clean, [clean_str(m) for m in cat_matrices], n=5, cutoff=0.75)
-        if matches:
-            candidates = [m for m in cat_matrices if clean_str(m) in matches]
-            
-    if not candidates: return pieza_raw 
-    if len(candidates) == 1: return candidates[0]
-        
-    best_score = -999
-    best_cand = candidates[0]
-    
-    for cand in candidates:
-        cand_clean = clean_str(cand)
-        score = 0
-        
-        if op_clean in ['20', '30', '40', '50', '60']:
-            if f"OP{op_clean}" in cand_clean: score += 10
-            if op_clean == '20' and 'MP2' in cand_clean: score += 10
-            if op_clean == '30' and 'MP3' in cand_clean: score += 10
-            if op_clean == '40' and 'MP4' in cand_clean: score += 10
-            if op_clean == '20' and ('MP1' in cand_clean or 'OP30' in cand_clean): score -= 5
-            
-        elif op_clean in ['MULTIPUESTO', 'MP', '10', 'PROGRESIVA', 'PROG', '']:
-            if 'MP1' in cand_clean or ('MP' not in cand_clean and 'OP' not in cand_clean): score += 5
-            if 'MP2' in cand_clean or 'OP20' in cand_clean or 'MP3' in cand_clean or 'OP30' in cand_clean: score -= 5
-            
-        if score > best_score:
-            best_score = score
-            best_cand = cand
-            
-    return best_cand
-
-# MATCHING 100% EXACTO (Para SQL_KEY)
-def get_best_match_sql(texto, lista_candidatos):
-    if pd.isna(texto) or not str(texto).strip(): return ""
-    val = clean_str(texto)
-    for cand in lista_candidatos:
-        if clean_str(cand) == val: 
-            return cand
-    return texto
-
-@st.cache_data(ttl=60)
-def load_all_sources():
+def extract_mantenimientos(url, tipo_mant):
     try:
-        df_cat = pd.read_csv(URL_CATALOGO).dropna(how='all')
-        df_cat.columns = [str(c).strip().upper() for c in df_cat.columns]
+        df = pd.read_csv(url)
+        cols = [str(c).upper().strip() for c in df.columns]
         
-        col_matriz = next((c for c in df_cat.columns if c == 'MATRIZ'), None)
-        # Apuntamos unicamente al Producto 1
-        col_prod1 = next((c for c in df_cat.columns if c in ['PRODUCTO 1', 'PRODUCTO', 'CODIGO']), None)
-        col_tipo = next((c for c in df_cat.columns if c == 'TIPO'), None)
-        col_op = next((c for c in df_cat.columns if c == 'OP'), None)
-        col_golpes = next((c for c in df_cat.columns if c == 'GOLPES'), None)
-
-        if not col_matriz:
-            st.error("❌ No se encontró la columna 'MATRIZ' en el Catálogo.")
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-        df_cat = df_cat.dropna(subset=[col_matriz])
-        df_cat['FORM_KEY'] = df_cat[col_matriz].astype(str).str.strip()
-        df_cat['SQL_KEY'] = df_cat[col_prod1].astype(str).str.strip() if col_prod1 else df_cat['FORM_KEY']
-        df_cat['OP_MOSTRAR'] = df_cat[col_op].fillna('-').astype(str) if col_op else '-'
-        df_cat['PIEZA_MOSTRAR'] = df_cat[col_matriz].fillna('-').astype(str)
-        df_cat['TIPO_MOSTRAR'] = df_cat[col_tipo].fillna('-').astype(str) if col_tipo else '-'
-        df_cat['LIMITE_GOLPES'] = pd.to_numeric(df_cat[col_golpes], errors='coerce').fillna(30000).astype(int) if col_golpes else 30000
-
-        lista_forms_keys = df_cat['FORM_KEY'].unique().tolist()
-        lista_sql_keys = df_cat['SQL_KEY'].unique().tolist()
-            
-    except Exception as e:
-        st.error(f"Error cargando Catálogo: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    def fetch_forms(url, tipo_mant):
-        try:
-            df_raw = pd.read_csv(url)
-            if df_raw.empty: return pd.DataFrame()
-
-            header_idx = -1
-            for i, row in df_raw.head(15).iterrows():
-                row_vals = " ".join([str(x).upper() for x in row.values])
-                if 'MARCA TEMPORAL' in row_vals or 'FECHA' in row_vals:
-                    header_idx = i; break
-            
-            if header_idx != -1: df_raw = pd.read_csv(url, skiprows=header_idx + 1)
-            df_raw.columns = [str(c).upper().strip() for c in df_raw.columns]
-            df_raw = df_raw.loc[:, ~df_raw.columns.duplicated()]
-            
-            col_f_manual = 'FECHA' if 'FECHA' in df_raw.columns else None
-            col_f_auto = next((c for c in df_raw.columns if 'MARCA TEMPORAL' in c), None)
-            
-            nombres_buscados = ['PIEZAS RENAULT', 'PIEZAS FIAT', 'PIEZAS PEUGEOT', 'PIEZAS FAURECIA', 'PIEZAS DENSO', 'MATRIZ']
-            cols_pieza = [c for c in df_raw.columns if any(n in c for n in nombres_buscados) and 'TIPO' not in c and '[' not in c]
-            if not cols_pieza:
-                cols_pieza = [c for c in df_raw.columns if 'PIEZA' in c and 'TIPO' not in c and 'NUMERO' not in c and '[' not in c]
-                          
-            cols_term = [c for c in df_raw.columns if 'TERMINADO' in c or 'TERMINO' in c or 'ESTADO DEL MANTENIMIENTO' in c]
-            
-            if not col_f_auto and not col_f_manual: return pd.DataFrame()
-
-            registros = []
-            for _, row in df_raw.iterrows():
-                # Parseo seguro y normalizado (sin horas)
-                fecha = parsear_fecha_segura(row.get(col_f_manual)) if col_f_manual else pd.NaT
-                if pd.isna(fecha) and col_f_auto:
-                    fecha = parsear_fecha_segura(row.get(col_f_auto))
-                if pd.isna(fecha): continue
-                
-                pieza_raw, op_raw = "", ""
-                for cp in cols_pieza:
-                    val = clean_str(row.get(cp))
-                    if val and val not in ['NAN', 'NONE', '-', '0', 'N/A', '']:
-                        pieza_raw = str(row.get(cp)) 
-                        col_op_name = find_op_col_for_pieza(cp, df_raw.columns)
-                        if col_op_name and pd.notna(row.get(col_op_name)):
-                            op_raw = str(row.get(col_op_name))
-                        break 
-                
-                if not pieza_raw: continue
-                
-                terminado = 'NO'
-                for ct in cols_term:
-                    val_t = clean_str(row.get(ct))
-                    if val_t in ['SI', 'SÍ', 'VERDADERO', 'FINALIZADO', 'OK']:
-                        terminado = 'SI'
-                        break
-                
-                f_key = get_best_match_hybrid(pieza_raw, op_raw, lista_forms_keys)
-                registros.append({'FECHA_DT': fecha, 'TIPO_MANT': tipo_mant, 'TERMINADO': terminado, 'FORM_KEY': f_key})
-                    
-            return pd.DataFrame(registros)
-        except Exception as e: 
-            st.error(f"Error procesando formulario {tipo_mant}: {e}")
+        col_fecha = next((i for i, c in enumerate(cols) if 'FECHA' in c or 'MARCA TEMPORAL' in c), None)
+        if col_fecha is None: 
             return pd.DataFrame()
 
-    df_prev = fetch_forms(URL_FORMS_PREV, "PREV")
-    df_corr = fetch_forms(URL_FORMS_CORR, "CORR")
-    df_forms_all = pd.concat([df_prev, df_corr], ignore_index=True) if not df_prev.empty or not df_corr.empty else pd.DataFrame()
+        terminos_clave = ['TERMINO', 'PREVENTIVO?', 'TERMINADO', 'CORRECTIVO']
+        cols_terminado_idx = [i for i, c in enumerate(cols) if any(t in c for t in terminos_clave)]
+        
+        registros = []
+        for _, row in df.iterrows():
+            fecha = pd.to_datetime(row.iloc[col_fecha], dayfirst=True, errors='coerce')
+            if pd.isna(fecha): continue
+            
+            estado_terminado = 'NO'
+            if not cols_terminado_idx: 
+                 estado_terminado = 'SI'
+            else:
+                for idx in cols_terminado_idx:
+                    val = str(row.iloc[idx]).strip().upper()
+                    if val == 'SI' or val == 'SÍ':
+                        estado_terminado = 'SI'
+                        break
+            
+            for i, col_name in enumerate(cols):
+                base_col = col_name.split('.')[0].strip()
+                if base_col in VALID_PIEZA_COLS:
+                    pieza_completa = clean_str(row.iloc[i])
+                    if pieza_completa and pieza_completa not in ['NAN', 'NONE', '-', '0', 'N/A', 'NO APLICA', '']:
+                        pieza_match = get_match_key(pieza_completa)
+                        op = ""
+                        for j in range(i+1, min(i+4, len(cols))):
+                            next_col = cols[j].split('.')[0].strip()
+                            if 'OPERACION' in next_col or 'OPERACIÓN' in next_col or 'OP' == next_col:
+                                op = clean_str(row.iloc[j])
+                                break
+                        registros.append({
+                            'Fecha': fecha, 
+                            'Pieza_Match': pieza_match, 
+                            'OP': op, 
+                            'Tipo_Mant': tipo_mant, 
+                            'Terminado': estado_terminado
+                        })
+        return pd.DataFrame(registros)
+    except Exception as e:
+        st.error(f"❌ Error al extraer datos de {tipo_mant}: {e}")
+        return pd.DataFrame()
 
+@st.cache_data(ttl=300)
+def load_all_data():
+    df_cat = pd.read_csv(URL_CATALOGO)
+    df_cat.columns = df_cat.columns.astype(str).str.replace('\n', ' ').str.replace('\r', '').str.strip()
+    df_cat.columns = df_cat.columns.str.replace(r'\s+', ' ', regex=True)
+    col_activo = next((c for c in df_cat.columns if 'ACTIVO' in c.upper()), None)
+    if col_activo:
+        df_cat = df_cat[df_cat[col_activo].astype(str).str.strip().str.upper() == 'SI']
+    
+    QUERY_SQL = """
+        SELECT 
+            Date as Fecha_Produccion,
+            Code as Codigo_Pieza,
+            Factory as Fabrica, 
+            COALESCE(Good, 0) as Buenas,
+            COALESCE(Rework, 0) as Retrabajo
+        FROM PROD_D_01
+    """ 
     try:
         conn = st.connection("wii_bi", type="sql")
+        df_prod = conn.query(QUERY_SQL)
+        df_prod.columns = df_prod.columns.astype(str).str.strip()
         
-        # CONSULTA SQL DEFINITIVA
-        # Se filtra 'ProductionOrderId IS NOT NULL' para evitar la fila resumen que duplica la producción
-        q = """
-        SELECT pr.PIEZA, p.FECHA, c.MAQUINA, SUM(p.GOLPES) as GOLPES 
-        FROM (
-            SELECT ProductId, CellId, CAST(Date AS DATE) as FECHA, SUM(Good + Rework) as GOLPES
-            FROM PROD_D_01
-            WHERE Date >= '2025-01-01' 
-              AND ProductionOrderId IS NOT NULL 
-            GROUP BY ProductId, CellId, CAST(Date AS DATE)
-        ) p
-        JOIN (
-            SELECT ProductId, MAX(Code) as PIEZA 
-            FROM PRODUCT 
-            GROUP BY ProductId
-        ) pr ON p.ProductId = pr.ProductId
-        JOIN (
-            SELECT CellId, MAX(Name) as MAQUINA 
-            FROM CELL 
-            GROUP BY CellId
-        ) c ON p.CellId = c.CellId
-        GROUP BY pr.PIEZA, p.FECHA, c.MAQUINA
-        """
+        df_prod = df_prod[df_prod['Fabrica'].astype(str).str.upper().str.contains('EST', na=False)]
         
-        df_sql = conn.query(q)
+        df_prod['Fecha'] = pd.to_datetime(df_prod['Fecha_Produccion'], errors='coerce')
+        df_prod['Buenas_Num'] = pd.to_numeric(df_prod['Buenas'], errors='coerce').fillna(0)
+        df_prod['Retrabajo_Num'] = pd.to_numeric(df_prod['Retrabajo'], errors='coerce').fillna(0)
+        df_prod['Golpes_Totales'] = df_prod['Buenas_Num'] + df_prod['Retrabajo_Num']
         
-        # Limpieza de nombres de máquinas antes de filtrar
-        df_sql['MAQUINA'] = df_sql['MAQUINA'].astype(str).str.strip().str.upper()
-        maquinas_clean = [m.strip().upper() for m in MAQUINAS_ESTAMPADO]
-        df_sql = df_sql[df_sql['MAQUINA'].isin(maquinas_clean)]
-        
-        df_sql = df_sql.groupby(['PIEZA', 'FECHA'])['GOLPES'].sum().reset_index()
-        df_sql['FECHA'] = pd.to_datetime(df_sql['FECHA'], errors='coerce').dt.normalize()
-        df_sql['GOLPES'] = pd.to_numeric(df_sql['GOLPES'], errors='coerce').fillna(0)
-        
-        mapeo_piezas = {p: get_best_match_sql(p, lista_sql_keys) for p in df_sql['PIEZA'].unique()}
-        df_sql['SQL_KEY'] = df_sql['PIEZA'].map(mapeo_piezas)
-    except Exception as e: 
-        st.error(f"Error SQL: {e}"); df_sql = pd.DataFrame()
+        df_prod['Pieza_Match'] = df_prod['Codigo_Pieza'].apply(lambda x: get_match_key(clean_str(x))) 
+    except Exception as e:
+        st.error(f"❌ Error al conectar o extraer datos de SQL Server: {e}")
+        df_prod = pd.DataFrame() 
 
-    return df_cat, df_sql, df_forms_all
+    df_prev = extract_mantenimientos(URL_PREV_FAMMA, "PREV")
+    df_corr = extract_mantenimientos(URL_CORR_FAMMA, "CORR")
+    
+    return df_cat, df_prod, pd.concat([df_prev, df_corr], ignore_index=True)
 
 # ==========================================
-# 4. LÓGICA DE PROCESAMIENTO
+# 4. MOTOR DE CRUCE Y CÁLCULO
 # ==========================================
-def procesar_datos(df_cat, df_sql, df_forms):
-    res_semaforo = []
-    fecha_corte_default = pd.to_datetime("2026-01-01")
+def procesar_estado_matrices(df_cat, df_prod, df_mant):
+    resultados = []
+    abiertos = []
+    col_pieza = next((c for c in df_cat.columns if c.upper() == 'PIEZA'), 'PIEZA')
+    col_op = next((c for c in df_cat.columns if c.upper() == 'OP'), 'OP')
+    col_cliente = next((c for c in df_cat.columns if 'CLIENTE' in c.upper()), 'CLIENTE')
+    col_tipo = next((c for c in df_cat.columns if 'TIPO' in c.upper()), 'TIPO')
+    col_limite = next((c for c in df_cat.columns if 'GOLPES PARA MANTENIMIENTO' in c.upper()), 'GOLPES PARA MANTENIMIENTO')
+    col_alerta = next((c for c in df_cat.columns if 'ALERTA' in c.upper()), 'ALERTA')
+    col_prev = next((c for c in df_cat.columns if 'ULTIMO PREVENTIVO' in c.upper()), 'ULTIMO PREVENTIVO')
+    col_corr = next((c for c in df_cat.columns if 'ULTIMO CORRECTIVO' in c.upper()), 'ULTIMO CORRECTIVO')
 
     for _, row in df_cat.iterrows():
-        f_key = row.get('FORM_KEY')
-        s_key = row.get('SQL_KEY')
+        pieza_completa = clean_str(row.get(col_pieza, ''))
+        op = clean_str(row.get(col_op, ''))
+        if not pieza_completa or pieza_completa == 'NAN': continue
+        pieza_match = get_match_key(pieza_completa)
         
-        if pd.isna(f_key) or not f_key: continue
+        limite_mant = pd.to_numeric(row.get(col_limite, 0), errors='coerce') or 20000
+        limite_alerta = pd.to_numeric(row.get(col_alerta, 0), errors='coerce') or (limite_mant * 0.8)
         
-        cliente = str(row.get('CLIENTE', '-')).strip().upper()
-        if cliente in ['NAN', 'NONE', '']: cliente = '-'
-
-        pieza_mostrar = str(row.get('PIEZA_MOSTRAR')).strip()
-        tipo_matriz = str(row.get('TIPO_MOSTRAR', '-')).strip().upper()
+        fecha_prev, fecha_corr, fecha_abierto = pd.NaT, pd.NaT, pd.NaT
+        tiene_abierto, tipo_abierto = False, ""
         
-        op_mostrar = str(row.get('OP_MOSTRAR', '-')).strip()
-        if op_mostrar in ['NAN', 'NONE', '']: op_mostrar = '-'
+        if col_prev: fecha_prev = pd.to_datetime(row.get(col_prev), dayfirst=True, errors='coerce')
+        if col_corr: fecha_corr = pd.to_datetime(row.get(col_corr), dayfirst=True, errors='coerce')
 
-        limite = int(row.get('LIMITE_GOLPES', 30000))
-        tipo_impreso = tipo_matriz if tipo_matriz not in ['NAN', 'NONE', ''] else '-'
+        if not df_mant.empty:
+            match = df_mant[(df_mant['Pieza_Match'] == pieza_match) & (df_mant['OP'] == op)]
+            term = match[match['Terminado'] == 'SI']
+            max_fecha_cerrado = pd.NaT
+            if not term.empty:
+                max_fecha_cerrado = term['Fecha'].max()
+                max_p = term[term['Tipo_Mant'] == 'PREV']['Fecha'].max()
+                max_c = term[term['Tipo_Mant'] == 'CORR']['Fecha'].max()
+                if pd.notna(max_p) and (pd.isna(fecha_prev) or max_p > fecha_prev): fecha_prev = max_p
+                if pd.notna(max_c) and (pd.isna(fecha_corr) or max_c > fecha_corr): fecha_corr = max_c
+                
+            ab = match[match['Terminado'] == 'NO']
+            if not ab.empty:
+                max_fecha_abierto = ab['Fecha'].max()
+                if pd.isna(max_fecha_cerrado) or max_fecha_abierto > max_fecha_cerrado:
+                    tiene_abierto = True
+                    fecha_abierto = max_fecha_abierto
+                    tipo_abierto = ab.loc[ab['Fecha'].idxmax(), 'Tipo_Mant']
 
-        f_prev, f_corr = pd.NaT, pd.NaT
+        fecha_base = pd.NaT
+        if pd.notna(fecha_prev) and pd.notna(fecha_corr): fecha_base = max(fecha_prev, fecha_corr)
+        elif pd.notna(fecha_prev): fecha_base = fecha_prev
+        elif pd.notna(fecha_corr): fecha_base = fecha_corr
 
-        if not df_forms.empty:
-            match_f = df_forms[df_forms['FORM_KEY'] == f_key].copy()
-            if not match_f.empty:
-                cerrados = match_f[match_f['TERMINADO'] == 'SI']
-                if not cerrados.empty:
-                    mp = cerrados[cerrados['TIPO_MANT'] == 'PREV']['FECHA_DT'].max()
-                    mc = cerrados[cerrados['TIPO_MANT'] == 'CORR']['FECHA_DT'].max()
-                    if pd.notna(mp): f_prev = mp
-                    if pd.notna(mc): f_corr = mc
-
-        fechas_validas = [f for f in [f_prev, f_corr] if pd.notna(f)]
-        fecha_inicio_calculo = max(fechas_validas) if fechas_validas else fecha_corte_default
-
-        prod = df_sql[(df_sql['SQL_KEY'] == s_key) & (df_sql['FECHA'] >= fecha_inicio_calculo)] if not df_sql.empty else pd.DataFrame()
-        g_total = int(prod['GOLPES'].sum()) if not prod.empty else 0
-
-        color = "ROJO" if g_total >= limite else "AMARILLO" if g_total >= (limite*0.8) else "VERDE"
-        estado = "MANT. REQUERIDO" if color == "ROJO" else "ALERTA PREVENTIVO" if color == "AMARILLO" else "OK"
+        prod_match = df_prod[df_prod['Pieza_Match'] == pieza_match]
         
-        res_semaforo.append({
-            'CLIENTE': cliente, 
-            'PIEZA': pieza_mostrar, 
-            'OP': op_mostrar, 
-            'TIPO': str(tipo_impreso).encode('latin-1', 'replace').decode('latin-1'),
-            'ULT_PREV': f_prev.strftime('%d/%m/%Y') if pd.notna(f_prev) else "-",
-            'ULT_CORR': f_corr.strftime('%d/%m/%Y') if pd.notna(f_corr) else "-",
-            'GOLPES': g_total, 
-            'LIMITE': limite, 
-            'ESTADO': estado, 
-            'COLOR': color
+        if pd.notna(fecha_base):
+            prod_match = prod_match[prod_match['Fecha'] > fecha_base]
+            
+        golpes_totales = int(prod_match['Golpes_Totales'].sum())
+        
+        color, estado = "VERDE", "OK"
+        if golpes_totales >= limite_mant: color, estado = "ROJO", "MANT. REQUERIDO"
+        elif golpes_totales >= limite_alerta: color, estado = "AMARILLO", "ALERTA PREVENTIVO"
+            
+        resultados.append({
+            'CLIENTE': clean_str(row.get(col_cliente, '-')), 'PIEZA': pieza_completa, 'OP': op,
+            'TIPO': clean_str(row.get(col_tipo, '-')), 'ULT_PREV': fecha_prev.strftime('%d/%m/%y') if pd.notna(fecha_prev) else "-",
+            'ULT_CORR': fecha_corr.strftime('%d/%m/%y') if pd.notna(fecha_corr) else "-",
+            'GOLPES': golpes_totales, 'LIMITE': int(limite_mant), 'ESTADO': estado, 'COLOR': color
         })
-
-    df_resultados = pd.DataFrame(res_semaforo)
+        if tiene_abierto:
+            abiertos.append({'CLIENTE': clean_str(row.get(col_cliente, '-')), 'PIEZA': pieza_completa, 'OP': op,
+                             'TIPO': clean_str(row.get(col_tipo, '-')), 'TIPO_MANT_ABIERTO': tipo_abierto, 'FECHA_APERTURA': fecha_abierto.strftime('%d/%m/%Y')})
+            
+    # ---> INICIO DEL CÓDIGO NUEVO PARA ORDENAR <---
+    df_resultados = pd.DataFrame(resultados)
     
     if not df_resultados.empty:
+        # Asignamos un número de prioridad: ROJO = 1, AMARILLO = 2, VERDE = 3
         orden_colores = {"ROJO": 1, "AMARILLO": 2, "VERDE": 3}
         df_resultados['Prioridad_Color'] = df_resultados['COLOR'].map(orden_colores)
         
+        # Ordenamos primero por prioridad de color (ascendente) y luego por golpes (descendente)
         df_resultados = df_resultados.sort_values(
             by=['Prioridad_Color', 'GOLPES'], 
             ascending=[True, False]
         ).drop(columns=['Prioridad_Color'])
-        
-    return df_resultados
+    # ---> FIN DEL CÓDIGO NUEVO PARA ORDENAR <---
+
+    return df_resultados, pd.DataFrame(abiertos)
 
 # ==========================================
 # 5. GENERACIÓN DEL PDF Y EXCEL
 # ==========================================
 class PDFGolpes(FPDF):
     def header(self):
-        self.set_font("Arial", 'B', 15); self.set_text_color(31, 73, 125)
-        self.cell(0, 10, "Resumen de Golpes", border=0, ln=True, align='C')
-        self.set_font("Arial", 'I', 9); self.set_text_color(100, 100, 100)
-        hora_arg = datetime.now(timezone.utc) - timedelta(hours=3)
-        self.cell(0, 5, f"Calculo generado el: {hora_arg.strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C'); self.ln(3)
+        self.set_font("Arial", 'B', 15)
+        self.set_text_color(31, 73, 125)
+        self.cell(0, 10, "Control de Golpes de Matrices (Detalle Principal)", border=0, ln=True, align='C')
+        self.set_font("Arial", 'I', 9)
+        self.set_text_color(100, 100, 100)
+        hora_arg = datetime.utcnow() - timedelta(hours=3)
+        self.cell(0, 5, f"Calculo generado el: {hora_arg.strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C')
+        self.ln(3)
         
     def footer(self):
-        self.set_y(-15); self.set_font("Arial", "I", 8); self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
+        self.set_y(-15)
+        self.set_font("Arial", "I", 8)
+        self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
 class PDFResumen(FPDF):
     def header(self):
-        self.set_font("Arial", 'B', 15); self.set_text_color(31, 73, 125)
-        self.cell(0, 10, "Estado de los Mantenimientos de Matrices Fumiscor", border=0, ln=True, align='C')
-        self.set_font("Arial", 'I', 9); self.set_text_color(100, 100, 100)
-        hora_arg = datetime.now(timezone.utc) - timedelta(hours=3)
-        self.cell(0, 5, f"Generado el: {hora_arg.strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C'); self.ln(3)
+        self.set_font("Arial", 'B', 15)
+        self.set_text_color(31, 73, 125)
+        self.cell(0, 10, "Estado General del Mantenimiento Preventivo", border=0, ln=True, align='C')
+        self.set_font("Arial", 'I', 9)
+        self.set_text_color(100, 100, 100)
+        hora_arg = datetime.utcnow() - timedelta(hours=3)
+        self.cell(0, 5, f"Generado el: {hora_arg.strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C')
+        self.ln(3)
         
     def footer(self):
-        self.set_y(-15); self.set_font("Arial", "I", 8); self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
+        self.set_y(-15)
+        self.set_font("Arial", "I", 8)
+        self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
 class PDFHistorial(FPDF):
     def header(self):
@@ -376,7 +277,7 @@ class PDFHistorial(FPDF):
         self.cell(0, 10, "Historial Especifico de Mantenimientos", border=0, ln=True, align='C')
         self.set_font("Arial", 'I', 9)
         self.set_text_color(100, 100, 100)
-        hora_arg = datetime.now(timezone.utc) - timedelta(hours=3)
+        hora_arg = datetime.utcnow() - timedelta(hours=3)
         self.cell(0, 5, f"Generado el: {hora_arg.strftime('%d/%m/%Y %H:%M')}", border=0, ln=True, align='C')
         self.ln(5)
 
@@ -385,108 +286,183 @@ class PDFHistorial(FPDF):
         self.set_font("Arial", "I", 8)
         self.cell(0, 10, f"Pagina {self.page_no()}", 0, 0, "C")
 
-def build_pdf_main(df_resultados):
+def build_pdf_main(df_resultados, df_abiertos):
     pdf = PDFGolpes(orientation='L', unit='mm', format='A4')
-    pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
     
+    # --- HOJA 1: DETALLE DE GOLPES ---
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    pdf.set_font("Arial", 'B', 9)
+    pdf.set_fill_color(31, 73, 125)
+    pdf.set_text_color(255, 255, 255)
     pdf.cell(15, 8, "Cliente", 1, 0, 'C', fill=True)
-    pdf.cell(76, 8, "Pieza / Matriz", 1, 0, 'C', fill=True)
-    pdf.cell(10, 8, "OP", 1, 0, 'C', fill=True)
-    pdf.cell(28, 8, "Tipo Matriz", 1, 0, 'C', fill=True)
+    pdf.cell(70, 8, "Codigo Pieza", 1, 0, 'C', fill=True)
+    pdf.cell(12, 8, "OP", 1, 0, 'C', fill=True)
+    pdf.cell(12, 8, "Tipo", 1, 0, 'C', fill=True)
     pdf.cell(22, 8, "Ult. Prev.", 1, 0, 'C', fill=True)
     pdf.cell(22, 8, "Ult. Corr.", 1, 0, 'C', fill=True)
     pdf.cell(26, 8, "Golpes Ac.", 1, 0, 'C', fill=True)
     pdf.cell(26, 8, "Limite M.", 1, 0, 'C', fill=True)
-    pdf.cell(52, 8, "Estado / Accion", 1, 1, 'C', fill=True)
+    pdf.cell(72, 8, "Estado / Accion", 1, 1, 'C', fill=True)
     
     pdf.set_font("Arial", '', 8)
     for _, row in df_resultados.iterrows():
         bg = (255, 180, 180) if row['COLOR'] == "ROJO" else (255, 240, 180) if row['COLOR'] == "AMARILLO" else (198, 239, 206)
         txt = (180, 0, 0) if row['COLOR'] == "ROJO" else (150, 100, 0) if row['COLOR'] == "AMARILLO" else (0, 100, 0)
-        tipo_str = str(row['TIPO']) if str(row['TIPO']).upper() not in ['NAN', 'NONE', ''] else '-'
-        
         pdf.set_text_color(0, 0, 0)
-        pdf.cell(15, 7, str(row['CLIENTE'])[:10], 1, 0, 'C')
-        pdf.cell(76, 7, str(row['PIEZA'])[:65], 1, 0, 'L')
-        pdf.cell(10, 7, str(row['OP'])[:8], 1, 0, 'C')
-        pdf.cell(28, 7, tipo_str[:15], 1, 0, 'C') 
+        pdf.cell(15, 7, str(row['CLIENTE']), 1, 0, 'C')
+        pdf.cell(70, 7, str(row['PIEZA'])[:45], 1, 0, 'L')
+        pdf.cell(12, 7, str(row['OP']), 1, 0, 'C')
+        pdf.cell(12, 7, str(row['TIPO']), 1, 0, 'C')
         pdf.cell(22, 7, str(row['ULT_PREV']), 1, 0, 'C')
         pdf.cell(22, 7, str(row['ULT_CORR']), 1, 0, 'C')
-        
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
         pdf.cell(26, 7, f"{row['GOLPES']:,}", 1, 0, 'C', fill=True)
         pdf.set_text_color(0, 0, 0); pdf.set_font("Arial", '', 8)
         pdf.cell(26, 7, f"{row['LIMITE']:,}", 1, 0, 'C')
         pdf.set_fill_color(*bg); pdf.set_text_color(*txt); pdf.set_font("Arial", 'B', 8)
-        pdf.cell(52, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
+        pdf.cell(72, 7, str(row['ESTADO']), 1, 1, 'C', fill=True)
 
-    buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    pdf.output(buf.name)
-    b = open(buf.name, "rb").read()
-    os.remove(buf.name)
-    return b
+    # --- HOJA 2: MANTENIMIENTOS ABIERTOS ---
+    if not df_abiertos.empty:
+        pdf.add_page()
+        pdf.set_font("Arial", 'B', 12); pdf.set_text_color(192, 0, 0)
+        pdf.cell(0, 8, "MANTENIMIENTOS ABIERTOS (Pendientes de Cierre)", ln=True)
+        pdf.ln(3)
+        pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(192, 0, 0); pdf.set_text_color(255, 255, 255)
+        pdf.cell(25, 8, "Cliente", 1, 0, 'C', fill=True)
+        pdf.cell(90, 8, "Pieza", 1, 0, 'C', fill=True)
+        pdf.cell(15, 8, "OP", 1, 0, 'C', fill=True)
+        pdf.cell(35, 8, "Tipo Mant.", 1, 0, 'C', fill=True)
+        pdf.cell(35, 8, "Fecha Apertura", 1, 1, 'C', fill=True)
+        pdf.set_font("Arial", '', 8); pdf.set_text_color(0, 0, 0)
+        for _, r in df_abiertos.iterrows():
+            pdf.cell(25, 7, r['CLIENTE'], 1, 0, 'C')
+            pdf.cell(90, 7, r['PIEZA'], 1, 0, 'L')
+            pdf.cell(15, 7, r['OP'], 1, 0, 'C')
+            pdf.cell(35, 7, r['TIPO_MANT_ABIERTO'], 1, 0, 'C')
+            pdf.cell(35, 7, r['FECHA_APERTURA'], 1, 1, 'C')
 
-def build_pdf_resumen(df_resultados):
-    pdf = PDFResumen(orientation='L', unit='mm', format='A4')
-    pdf.set_auto_page_break(auto=True, margin=15); pdf.add_page(); pdf.ln(2)
-    
-    resumen_data = []
-    total_gen = len(df_resultados); total_ok = len(df_resultados[df_resultados['COLOR'] == 'VERDE']); total_nok = total_gen - total_ok
-    for c in sorted([x for x in df_resultados['CLIENTE'].unique() if x != "-"]):
-        df_c = df_resultados[df_resultados['CLIENTE'] == c]
-        tot = len(df_c); ok = len(df_c[df_c['COLOR'] == 'VERDE']); nok = tot - ok
-        if tot > 0: resumen_data.append({'CLIENTE': c, 'TOT': tot, 'OK': ok, 'NOK': nok, 'POK': f"{int(round(ok/tot*100))}%", 'PNOK': f"{int(round(nok/tot*100))}%"})
+    tmp_pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
+    try:
+        pdf.output(tmp_pdf_path)
+        with open(tmp_pdf_path, "rb") as f:
+            return f.read()
+    finally:
+        if os.path.exists(tmp_pdf_path):
+            os.remove(tmp_pdf_path)
 
-    pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255); mx = 43.5; pdf.set_x(mx)
-    pdf.cell(35, 6, "CLIENTE", 1, 0, 'C', fill=True); pdf.cell(25, 6, "TOTAL PIEZAS", 1, 0, 'C', fill=True)
-    pdf.cell(35, 6, "OK / CON PREV.", 1, 0, 'C', fill=True); pdf.cell(35, 6, "ALERTA / VENCIDO", 1, 0, 'C', fill=True)
-    pdf.cell(40, 6, "% OK", 1, 0, 'C', fill=True); pdf.cell(40, 6, "% NO OK", 1, 1, 'C', fill=True)
-    
-    pdf.set_font("Arial", '', 9); pdf.set_text_color(0, 0, 0)
-    for r in resumen_data:
-        pdf.set_x(mx); pdf.cell(35, 6, r['CLIENTE'], 1, 0, 'C'); pdf.cell(25, 6, str(r['TOT']), 1, 0, 'C')
-        pdf.cell(35, 6, str(r['OK']), 1, 0, 'C'); pdf.cell(35, 6, str(r['NOK']), 1, 0, 'C')
-        pdf.cell(40, 6, r['POK'], 1, 0, 'C'); pdf.cell(40, 6, r['PNOK'], 1, 1, 'C')
-        
-    pdf.set_x(mx); pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(220, 220, 220)
-    pdf.cell(35, 6, "TOTAL", 1, 0, 'C', fill=True); pdf.cell(25, 6, str(total_gen), 1, 0, 'C', fill=True)
-    pdf.cell(35, 6, str(total_ok), 1, 0, 'C', fill=True); pdf.cell(35, 6, str(total_nok), 1, 0, 'C', fill=True)
-    pdf.cell(40, 6, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
-    pdf.cell(40, 6, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
-    
-    if len(resumen_data) > 0:
-        pdf.ln(5); y_charts = pdf.get_y()
-        fig_gen = go.Figure(data=[go.Pie(labels=['EN REGLA', 'VENCIDO/ALERTA'], values=[total_ok, total_nok], marker_colors=['#2ca02c', '#d62728'])])
-        fig_gen.update_traces(textposition='inside', textinfo='percent+label', showlegend=False)
-        fig_gen.update_layout(title_text="Estado General (Total)", title_x=0.5, margin=dict(t=40, b=10, l=10, r=10), height=300, width=300)
-
-        fig_cli = make_subplots(rows=1, cols=len(resumen_data), specs=[[{'type':'domain'}] * len(resumen_data)], subplot_titles=[r['CLIENTE'] for r in resumen_data])
-        for i, r in enumerate(resumen_data):
-            fig_cli.add_trace(go.Pie(labels=['EN REGLA', 'VENCIDO/ALERTA'], values=[r['OK'], r['NOK']], marker_colors=['#2ca02c', '#d62728']), 1, i + 1)
-        
-        fig_cli.update_traces(textposition='inside', textinfo='percent')
-        fig_cli.update_layout(title_text="Desglose por Cliente", title_x=0.5, showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5), margin=dict(t=40, b=40, l=10, r=10), height=300, width=700)
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_gen:
-            fig_gen.write_image(tmp_gen.name); pdf.image(tmp_gen.name, x=15, y=y_charts, w=70); os.remove(tmp_gen.name)
-            
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_cli:
-            fig_cli.write_image(tmp_cli.name); pdf.image(tmp_cli.name, x=90, y=y_charts, w=190); os.remove(tmp_cli.name)
-    
-    buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    pdf.output(buf.name)
-    b = open(buf.name, "rb").read()
-    os.remove(buf.name)
-    return b
-
-def build_excel_main(df_resultados):
+def build_excel_main(df_resultados, df_abiertos):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df_resultados.to_excel(writer, index=False, sheet_name='Estado de Matrices')
+        if not df_abiertos.empty:
+            df_abiertos.to_excel(writer, index=False, sheet_name='Abiertos')
     return output.getvalue()
 
-def build_pdf_historial(matriz_nombre, df_hist):
+def build_pdf_resumen(df_resultados):
+    pdf = PDFResumen(orientation='L', unit='mm', format='A4')
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.ln(2)
+    
+    resumen_data = []
+    total_gen = len(df_resultados)
+    total_nok = len(df_resultados[df_resultados['COLOR'] == 'ROJO'])
+    total_ok = total_gen - total_nok
+    
+    for c in sorted([x for x in df_resultados['CLIENTE'].unique() if x != "-"]):
+        df_c = df_resultados[df_resultados['CLIENTE'] == c]
+        tot = len(df_c)
+        nok = len(df_c[df_c['COLOR'] == 'ROJO']) 
+        ok = tot - nok 
+        if tot > 0:
+            resumen_data.append({
+                'CLIENTE': c, 'TOT': tot, 'OK': ok, 'NOK': nok, 
+                'POK': f"{int(round(ok/tot*100))}%", 
+                'PNOK': f"{int(round(nok/tot*100))}%"
+            })
+
+    # --- 1. TABLA RESUMEN ---
+    pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(31, 73, 125); pdf.set_text_color(255, 255, 255)
+    mx = 43.5; pdf.set_x(mx)
+    pdf.cell(35, 6, "CLIENTE", 1, 0, 'C', fill=True)
+    pdf.cell(25, 6, "TOTAL OP", 1, 0, 'C', fill=True)
+    pdf.cell(35, 6, "CON PREV.", 1, 0, 'C', fill=True)
+    pdf.cell(35, 6, "SIN MANT.", 1, 0, 'C', fill=True)
+    pdf.cell(40, 6, "% PREV", 1, 0, 'C', fill=True)
+    pdf.cell(40, 6, "% SIN MANT", 1, 1, 'C', fill=True)
+    
+    pdf.set_font("Arial", '', 9); pdf.set_text_color(0, 0, 0)
+    for r in resumen_data:
+        pdf.set_x(mx)
+        pdf.cell(35, 6, r['CLIENTE'], 1, 0, 'C')
+        pdf.cell(25, 6, str(r['TOT']), 1, 0, 'C')
+        pdf.cell(35, 6, str(r['OK']), 1, 0, 'C')
+        pdf.cell(35, 6, str(r['NOK']), 1, 0, 'C')
+        pdf.cell(40, 6, r['POK'], 1, 0, 'C')
+        pdf.cell(40, 6, r['PNOK'], 1, 1, 'C')
+        
+    pdf.set_x(mx); pdf.set_font("Arial", 'B', 9); pdf.set_fill_color(220, 220, 220)
+    pdf.cell(35, 6, "TOTAL", 1, 0, 'C', fill=True)
+    pdf.cell(25, 6, str(total_gen), 1, 0, 'C', fill=True)
+    pdf.cell(35, 6, str(total_ok), 1, 0, 'C', fill=True)
+    pdf.cell(35, 6, str(total_nok), 1, 0, 'C', fill=True)
+    pdf.cell(40, 6, f"{int(round(total_ok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 0, 'C', fill=True)
+    pdf.cell(40, 6, f"{int(round(total_nok/total_gen*100))}%" if total_gen > 0 else "0%", 1, 1, 'C', fill=True)
+    
+    # --- 2. GRÁFICOS DE TORTA ---
+    if len(resumen_data) > 0:
+        pdf.ln(5)
+        y_charts = pdf.get_y()
+        
+        fig_gen, ax_gen = plt.subplots(figsize=(3, 3))
+        ax_gen.pie([total_ok, total_nok], labels=['CON PREVENTIVO', 'SIN MANT.'], 
+                   colors=['#2ca02c', '#d62728'], autopct='%1.1f%%', textprops={'fontsize': 8})
+        ax_gen.set_title("Matrices Totales", fontsize=10)
+        
+        tmp_gen_path = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
+        try:
+            fig_gen.savefig(tmp_gen_path, bbox_inches='tight', dpi=150)
+            pdf.image(tmp_gen_path, x=15, y=y_charts, w=70) 
+        finally:
+            plt.close(fig_gen)
+            if os.path.exists(tmp_gen_path):
+                os.remove(tmp_gen_path)
+
+        num_clientes = len(resumen_data)
+        fig_cli, axs = plt.subplots(1, num_clientes, figsize=(2.5 * num_clientes, 3))
+        
+        if num_clientes == 1:
+            axs = [axs]
+            
+        for i, r in enumerate(resumen_data):
+            axs[i].pie([r['OK'], r['NOK']], colors=['#2ca02c', '#d62728'], autopct='%1.1f%%', textprops={'fontsize': 8})
+            axs[i].set_title(r['CLIENTE'], fontsize=9)
+            
+        fig_cli.legend(['CON PREVENTIVO', 'SIN MANT.'], loc='lower center', ncol=2, fontsize=8, bbox_to_anchor=(0.5, -0.2))
+        fig_cli.suptitle("Desglose por Cliente", fontsize=10, y=1.05)
+        
+        tmp_cli_path = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
+        try:
+            fig_cli.savefig(tmp_cli_path, bbox_inches='tight', dpi=150)
+            pdf.image(tmp_cli_path, x=90, y=y_charts, w=190) 
+        finally:
+            plt.close(fig_cli)
+            if os.path.exists(tmp_cli_path):
+                os.remove(tmp_cli_path)
+
+    tmp_pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
+    try:
+        pdf.output(tmp_pdf_path)
+        with open(tmp_pdf_path, "rb") as f:
+            return f.read()
+    finally:
+        if os.path.exists(tmp_pdf_path):
+            os.remove(tmp_pdf_path)
+
+def build_pdf_historial(matriz_nombre, df_hist, leyenda_actual=""):
     pdf = PDFHistorial(orientation='P', unit='mm', format='A4')
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -496,8 +472,8 @@ def build_pdf_historial(matriz_nombre, df_hist):
     pdf.set_text_color(0, 0, 0)
     
     matriz_str = matriz_nombre.encode('latin-1', 'replace').decode('latin-1')
-    pdf.cell(0, 10, f"Matriz / Operacion: {matriz_str}", ln=True, align='L')
-    pdf.ln(2)
+    pdf.cell(0, 6, f"Matriz / Operacion: {matriz_str}", ln=True, align='L')
+    pdf.ln(3)
 
     # Encabezado de la tabla
     pdf.set_font("Arial", 'B', 9)
@@ -526,63 +502,117 @@ def build_pdf_historial(matriz_nombre, df_hist):
         
         pdf.cell(w_golpes, 7, str(row['Golpes al momento (Desde mant. anterior)']), 1, 1, 'C')
 
-    buf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    pdf.output(buf.name)
-    b = open(buf.name, "rb").read()
-    os.remove(buf.name)
-    return b
+    # ---> INYECCIÓN DE LA LEYENDA ACTUAL AL FINAL DE LA TABLA EN EL PDF <---
+    if leyenda_actual:
+        pdf.ln(5)
+        pdf.set_x(offset)
+        pdf.set_font("Arial", 'B', 9.5)
+        pdf.set_fill_color(255, 243, 180) # Fondo amarillo suave para resaltar igual que en la web
+        pdf.set_text_color(0, 0, 0)
+        leyenda_clean = leyenda_actual.encode('latin-1', 'replace').decode('latin-1')
+        pdf.cell(w_fecha + w_tipo + w_golpes, 8, f"  {leyenda_clean}  ", border=1, ln=True, align='C', fill=True)
+
+    tmp_pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
+    try:
+        pdf.output(tmp_pdf_path)
+        with open(tmp_pdf_path, "rb") as f:
+            return f.read()
+    finally:
+        if os.path.exists(tmp_pdf_path):
+            os.remove(tmp_pdf_path)
 
 # ==========================================
-# 6. INTERFAZ PRINCIPAL
+# 6. INTERFAZ DE STREAMLIT
 # ==========================================
-if st.button("🔄 Sincronizar Bases de Datos", use_container_width=True):
-    st.cache_data.clear(); st.rerun()
 
-with st.spinner("Conectando y procesando..."):
-    df_cat, df_sql, df_forms = load_all_sources()
+if st.button("🔄 Forzar Actualización de Datos (Borrar Caché)", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
 
-if not df_cat.empty:
-    if st.button("⚙️ Procesar Datos de Matrices y Generar Informes", use_container_width=True, type="primary"):
-        with st.spinner("Calculando estado de matrices y renderizando documentos..."):
-            df_res = procesar_datos(df_cat, df_sql, df_forms)
-            st.session_state['df_res'] = df_res
+with st.spinner("Conectando y descargando bases de datos..."):
+    try:
+        df_cat_raw, df_prod_raw, df_mant_raw = load_all_data()
+        datos_listos = True
+    except Exception as e:
+        st.error(f"Error critico: {e}")
+        datos_listos = False
+
+if datos_listos:
+    st.success("Bases de datos sincronizadas exitosamente.")
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.info("Reporte oficial de control de golpes. Cruza catálogo activo con producción acumulada (vía SQL Server).")
+        
+    with col2:
+        if st.button("⚙️ Procesar Datos de Matrices", use_container_width=True, type="primary"):
+            with st.spinner("Calculando estado de matrices..."):
+                df_res, df_abiertos = procesar_estado_matrices(df_cat_raw, df_prod_raw, df_mant_raw)
+                
+                st.session_state['df_res'] = df_res
+                st.session_state['df_abiertos'] = df_abiertos
 
     if 'df_res' in st.session_state and not st.session_state['df_res'].empty:
         df_res = st.session_state['df_res']
+        df_abiertos = st.session_state['df_abiertos']
         
         rojos = len(df_res[df_res['COLOR']=='ROJO'])
         amarillos = len(df_res[df_res['COLOR']=='AMARILLO'])
         verdes = len(df_res[df_res['COLOR']=='VERDE'])
         
         st.write("---")
-        st.write(f"**Resumen de la corrida:** 🔴 {rojos} Criticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
+        st.write(f"**Resumen de la corrida:** 🔴 {rojos} Críticas | 🟡 {amarillos} Alerta | 🟢 {verdes} OK")
         
-        st.dataframe(df_res[['CLIENTE', 'PIEZA', 'OP', 'TIPO', 'ULT_PREV', 'ULT_CORR', 'GOLPES', 'ESTADO']].style.apply(lambda x: ['background-color: lightcoral' if v == 'ROJO' else 'background-color: lightgoldenrodyellow' if v == 'AMARILLO' else 'background-color: lightgreen' for v in x], subset=['ESTADO']))
-
         col_desc1, col_desc2, col_desc3 = st.columns(3)
-        fecha_str = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime('%d%m%Y')
+        
+        h = datetime.utcnow() - timedelta(hours=3)
+        fecha_str = h.strftime('%d%m%Y')
         
         with col_desc1:
-            pdf_main_data = build_pdf_main(df_res)
-            st.download_button(label="📥 PDF: Resumen de Golpes", data=pdf_main_data, file_name=f"Resumen_de_Golpes_{fecha_str}.pdf", mime="application/pdf", use_container_width=True)
+            pdf_main_data = build_pdf_main(df_res, df_abiertos)
+            st.download_button(
+                label="📥 PDF: Reporte Principal (Detalle)", 
+                data=pdf_main_data, 
+                file_name=f"Reporte_Golpes_Detalle_{fecha_str}.pdf", 
+                mime="application/pdf", 
+                use_container_width=True
+            )
             
         with col_desc2:
-            excel_main_data = build_excel_main(df_res)
-            st.download_button(label="📥 EXCEL: Resumen de Golpes", data=excel_main_data, file_name=f"Resumen_de_Golpes_{fecha_str}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-            
+            excel_main_data = build_excel_main(df_res, df_abiertos)
+            st.download_button(
+                label="📥 EXCEL: Reporte Principal (Detalle)", 
+                data=excel_main_data, 
+                file_name=f"Reporte_Golpes_Detalle_{fecha_str}.xlsx", 
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                use_container_width=True
+            )
+
         with col_desc3:
             pdf_resumen_data = build_pdf_resumen(df_res)
-            st.download_button(label="📊 PDF: Graficos y Estado General", data=pdf_resumen_data, file_name=f"Estado_Mantenimientos_{fecha_str}.pdf", mime="application/pdf", use_container_width=True)
+            st.download_button(
+                label="📊 PDF: Resumen General (Tabla/Gráficos)", 
+                data=pdf_resumen_data, 
+                file_name=f"Reporte_Golpes_Resumen_{fecha_str}.pdf", 
+                mime="application/pdf", 
+                use_container_width=True
+            )
+    elif 'df_res' in st.session_state and st.session_state['df_res'].empty:
+        st.warning("No hay datos activos en el catálogo.")
 
 # ==========================================
 # 7. HISTORIAL ESPECÍFICO DE MATRIZ
 # ==========================================
-st.write("---")
-st.markdown('<div class="header-style">🔍 Historial Especifico por Matriz</div>', unsafe_allow_html=True)
+if datos_listos and not df_cat_raw.empty:
+    st.write("---")
+    st.markdown('<div class="header-style">🔍 Historial Específico por Matriz</div>', unsafe_allow_html=True)
 
-if not df_cat.empty:
-    df_cat['OPCION_SELECT'] = df_cat['CLIENTE'].fillna('-') + " | " + df_cat['PIEZA_MOSTRAR'] + " | OP: " + df_cat['OP_MOSTRAR']
-    opciones_matriz = sorted(df_cat['OPCION_SELECT'].dropna().unique().tolist())
+    col_pieza_hist = next((c for c in df_cat_raw.columns if c.upper() == 'PIEZA'), 'PIEZA')
+    col_op_hist = next((c for c in df_cat_raw.columns if c.upper() == 'OP'), 'OP')
+    col_cliente_hist = next((c for c in df_cat_raw.columns if 'CLIENTE' in c.upper()), 'CLIENTE')
+
+    df_cat_raw['OPCION_SELECT'] = df_cat_raw[col_cliente_hist].fillna('-').astype(str) + " | " + df_cat_raw[col_pieza_hist].fillna('-').astype(str) + " | OP: " + df_cat_raw[col_op_hist].fillna('-').astype(str)
+    opciones_matriz = sorted(df_cat_raw['OPCION_SELECT'].dropna().unique().tolist())
     
     matriz_seleccionada = st.selectbox(
         "Seleccione una Matriz para revisar su historial de mantenimientos:", 
@@ -590,38 +620,39 @@ if not df_cat.empty:
     )
 
     if matriz_seleccionada != "--- Seleccione una opcion ---":
-        cat_info = df_cat[df_cat['OPCION_SELECT'] == matriz_seleccionada].iloc[0]
-        f_key = cat_info['FORM_KEY']
-        s_key = cat_info['SQL_KEY']
+        cat_info = df_cat_raw[df_cat_raw['OPCION_SELECT'] == matriz_seleccionada].iloc[0]
+        pieza_str = clean_str(cat_info.get(col_pieza_hist, ''))
+        op_str = clean_str(cat_info.get(col_op_hist, ''))
+        pieza_match_key = get_match_key(pieza_str)
 
-        if not df_forms.empty:
-            df_hist_mant = df_forms[(df_forms['FORM_KEY'] == f_key) & (df_forms['TERMINADO'] == 'SI')].copy()
+        if not df_mant_raw.empty:
+            df_hist_mant = df_mant_raw[(df_mant_raw['Pieza_Match'] == pieza_match_key) & (df_mant_raw['OP'] == op_str) & (df_mant_raw['Terminado'] == 'SI')].copy()
         else:
             df_hist_mant = pd.DataFrame()
 
         if df_hist_mant.empty:
             st.info("ℹ️ No hay registros de mantenimientos finalizados para esta matriz en los formularios.")
         else:
-            df_hist_mant = df_hist_mant.sort_values('FECHA_DT')
+            df_hist_mant = df_hist_mant.sort_values('Fecha')
             historial_data = []
             
             es_primer_registro = True
             fecha_anterior = pd.to_datetime("2025-01-01") 
 
             for _, row in df_hist_mant.iterrows():
-                fecha_mant = row['FECHA_DT']
-                tipo_mant = row['TIPO_MANT']
+                fecha_mant = row['Fecha']
+                tipo_mant = row['Tipo_Mant']
 
                 if es_primer_registro:
                     golpes_acumulados = 0
                     texto_golpes = "0 (Registro Inicial)"
                     es_primer_registro = False
                 else:
-                    if not df_sql.empty:
-                        df_golpes = df_sql[(df_sql['SQL_KEY'] == s_key) & 
-                                           (df_sql['FECHA'] > fecha_anterior) & 
-                                           (df_sql['FECHA'] <= fecha_mant)]
-                        golpes_acumulados = df_golpes['GOLPES'].sum()
+                    if not df_prod_raw.empty:
+                        df_golpes = df_prod_raw[(df_prod_raw['Pieza_Match'] == pieza_match_key) & 
+                                                (df_prod_raw['Fecha'] > fecha_anterior) & 
+                                                (df_prod_raw['Fecha'] <= fecha_mant)]
+                        golpes_acumulados = df_golpes['Golpes_Totales'].sum()
                     else:
                         golpes_acumulados = 0
                     texto_golpes = f"{int(golpes_acumulados):,}".replace(',', '.')
@@ -637,7 +668,7 @@ if not df_cat.empty:
 
             df_hist_mostrar = pd.DataFrame(historial_data)
             
-            st.write("📝 **Selecciona que registros quieres incluir en el PDF a exportar:**")
+            st.write("📝 **Selecciona qué registros quieres incluir en el PDF a exportar:**")
             
             df_editado = st.data_editor(
                 df_hist_mostrar,
@@ -655,11 +686,20 @@ if not df_cat.empty:
 
             df_a_exportar = df_editado[df_editado["Exportar"] == True].copy()
             
+            # ---> CÁLCULO PREVIO DE GOLPES ACTUALES PARA QUE SALGA EN EL PDF <---
+            golpes_actuales = 0
+            if not df_prod_raw.empty:
+                golpes_actuales = df_prod_raw[(df_prod_raw['Pieza_Match'] == pieza_match_key) & (df_prod_raw['Fecha'] > fecha_anterior)]['Golpes_Totales'].sum()
+            
+            golpes_str = f"{int(golpes_actuales):,}".replace(',', '.')
+            leyenda_actual = f"Golpes acumulados actualmente (desde el {fecha_anterior.strftime('%d/%m/%Y')}): {golpes_str} golpes."
+            
             if not df_a_exportar.empty:
-                pdf_hist_data = build_pdf_historial(matriz_seleccionada, df_a_exportar)
+                # Pasamos la cadena con los golpes actuales a la función creadora del PDF
+                pdf_hist_data = build_pdf_historial(matriz_seleccionada, df_a_exportar, leyenda_actual)
                 
-                nombre_seguro = "".join(c for c in s_key if c.isalnum() or c in ('-', '_')).strip()
-                fecha_str = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime('%d%m%Y')
+                nombre_seguro = "".join(c for c in pieza_match_key if c.isalnum() or c in ('-', '_')).strip()
+                fecha_str = (datetime.utcnow() - timedelta(hours=3)).strftime('%d%m%Y')
                 
                 st.download_button(
                     label="📥 Exportar Historial Seleccionado a PDF",
@@ -670,22 +710,4 @@ if not df_cat.empty:
                 )
             else:
                 st.warning("⚠️ Debes seleccionar al menos una fila para poder exportar el PDF.")
-                
-            if not df_sql.empty:
-                golpes_actuales = df_sql[(df_sql['SQL_KEY'] == s_key) & (df_sql['FECHA'] > fecha_anterior)]['GOLPES'].sum()
-                st.caption(f"**Golpes acumulados actualmente (desde el {fecha_anterior.strftime('%d/%m/%Y')}):** {int(golpes_actuales):,} golpes.")
-
-            with st.expander("🛠️ Diagnóstico de datos para esta matriz"):
-                st.write(f"**FORM_KEY:** `{f_key}` | **SQL_KEY:** `{s_key}`")
-                if not df_sql.empty:
-                    sub_sql = df_sql[df_sql['SQL_KEY'] == s_key].sort_values('FECHA', ascending=False)
-                    st.write(f"**Total filas en SQL (filtradas):** {len(sub_sql)}")
-                    if not sub_sql.empty:
-                        st.write(f"**Última fecha con producción en SQL:** {sub_sql['FECHA'].max().strftime('%d/%m/%Y')}")
-                        st.write("**Últimos 10 registros de producción en SQL:**")
-                        st.dataframe(sub_sql.head(10))
-                    else:
-                        st.warning("No hay ninguna fila en df_sql para este SQL_KEY.")
-                
-                st.write("**Fechas parseadas en formularios (sin formatear):**")
-                st.dataframe(df_hist_mant[['FECHA_DT', 'TIPO_MANT', 'TERMINADO']])
+                st.caption(f"**{leyenda_actual}**")
