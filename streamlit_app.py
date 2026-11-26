@@ -710,4 +710,5 @@ if datos_listos and not df_cat_raw.empty:
                 )
             else:
                 st.warning("⚠️ Debes seleccionar al menos una fila para poder exportar el PDF.")
-                st.caption(f"**{leyenda_actual}**")
+                
+            st.caption(f"**{leyenda_actual}**")
