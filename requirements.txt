@@ -5,5 +5,3 @@ fpdf2
 SQLAlchemy
 pymssql
 xlsxwriter
-plotly
-kaleido
